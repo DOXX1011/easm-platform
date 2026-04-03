@@ -1,29 +1,72 @@
+version: "3.9"
+
 services:
-  db:
+  argus-postgres:
     image: postgres:16
-    env_file: .env
+    container_name: argus-postgres
+    restart: unless-stopped
+    env_file:
+      - .env
     environment:
       POSTGRES_DB: ${POSTGRES_DB}
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    ports:
+      - "${POSTGRES_PORT}:5432"
     volumes:
-      - db_data:/var/lib/postgresql/data
+      - argus-postgres-data:/var/lib/postgresql/data
+      - ./db/init:/docker-entrypoint-initdb.d
+    networks:
+      - argus-network
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
-      interval: 5s
+      interval: 10s
       timeout: 5s
-      retries: 10
+      retries: 5
 
-  web:
-    build: ./web
-    env_file: .env
+  argus-backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: argus-backend
+    restart: unless-stopped
+    env_file:
+      - .env
     environment:
-      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
-    depends_on:
-      db:
-        condition: service_healthy
+      DATABASE_URL: ${DATABASE_URL}
+      BACKEND_PORT: ${BACKEND_PORT}
     ports:
-      - "${WEB_PORT}:8000"
+      - "${BACKEND_PORT}:8000"
+    volumes:
+      - ./backend/app:/app/app
+      - ./backend/scripts:/app/scripts
+    depends_on:
+      argus-postgres:
+        condition: service_healthy
+    networks:
+      - argus-network
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+  argus-frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: argus-frontend
+    restart: unless-stopped
+    ports:
+      - "${FRONTEND_PORT}:5173"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    depends_on:
+      - argus-backend
+    networks:
+      - argus-network
+    command: npm run dev -- --host 0.0.0.0 --port 5173
 
 volumes:
-  db_data:
+  argus-postgres-data:
+
+networks:
+  argus-network:
+    driver: bridge
