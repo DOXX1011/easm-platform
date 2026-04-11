@@ -1,15 +1,41 @@
-import { useState } from "react";
-import { Lock, Grid, Box, Mail, KeyRound, Eye } from "lucide-react";
+import { useEffect, useState } from "react";
+import { Lock, Grid, Box, Mail, KeyRound, Eye, Clock3 } from "lucide-react";
+import {
+  getAssets,
+  createAsset,
+  deleteAsset,
+  getAssetChecks,
+  saveAssetChecks,
+  runAssetNow,
+  getAssetHistory,
+} from "@/lib/assetsApi";
 
 const navItems = [
   { id: "overview", label: "Home", icon: Grid },
   { id: "assets", label: "Assets", icon: Box },
+  { id: "history", label: "History", icon: Clock3 },
   { id: "email", label: "Email Posture", icon: Mail },
   { id: "tls", label: "TLS/HTTPS", icon: Lock },
   { id: "credentials", label: "Credential Exposure", icon: KeyRound },
 ];
 
 const frequencyOptions = ["1 min", "15 min", "1 hour", "6 hours", "Daily"];
+
+const frequencyLabelToApi = {
+  "1 min": "1min",
+  "15 min": "15min",
+  "1 hour": "1hour",
+  "6 hours": "6hours",
+  Daily: "daily",
+};
+
+const frequencyApiToLabel = {
+  "1min": "1 min",
+  "15min": "15 min",
+  "1hour": "1 hour",
+  "6hours": "6 hours",
+  "daily": "Daily",
+};
 
 const assetTypeOptions = [
   { value: "host", label: "Host / Server" },
@@ -29,8 +55,30 @@ const availabilityByType = {
   website: { ports: false, email: false, tls: true },
 };
 
-function createChecksForType(type) {
-  const availability = availabilityByType[type];
+function toApiFrequency(label) {
+  return frequencyLabelToApi[label] || "daily";
+}
+
+function toUiFrequency(value) {
+  return frequencyApiToLabel[value] || "Daily";
+}
+
+function getAvailability(type, allowedChecks = null) {
+  const fallback = availabilityByType[type] || { ports: false, email: false, tls: false };
+
+  if (!Array.isArray(allowedChecks) || allowedChecks.length === 0) {
+    return fallback;
+  }
+
+  return {
+    ports: allowedChecks.includes("ports"),
+    email: allowedChecks.includes("email"),
+    tls: allowedChecks.includes("tls"),
+  };
+}
+
+function createChecksForType(type, allowedChecks = null) {
+  const availability = getAvailability(type, allowedChecks);
 
   return {
     ports: {
@@ -56,7 +104,17 @@ function getStatusFromChecks(checks) {
     (check) => check.available && check.enabled && check.frequency
   );
 
-  return hasEnabledScheduled ? "monitoring_enabled" : "not_configured";
+  return hasEnabledScheduled ? "configured" : "not_configured";
+}
+
+function normalizeStatus(status) {
+  if (!status) return null;
+
+  if (status === "configured" || status === "monitoring_enabled") {
+    return "configured";
+  }
+
+  return "not_configured";
 }
 
 function getAssetTypeLabel(type) {
@@ -85,17 +143,132 @@ function PlaceholderPanel({ text }) {
 export default function App() {
   const [activeTab, setActiveTab] = useState("overview");
   const [assets, setAssets] = useState([]);
+  const [assetsLoading, setAssetsLoading] = useState(false);
+  const [assetsError, setAssetsError] = useState("");
 
   const [isAddAssetOpen, setIsAddAssetOpen] = useState(false);
   const [addForm, setAddForm] = useState({ name: "", target: "", type: "" });
   const [addErrors, setAddErrors] = useState({ target: "", type: "" });
+  const [addSubmitError, setAddSubmitError] = useState("");
+  const [isSavingAsset, setIsSavingAsset] = useState(false);
 
   const [configuredAssetId, setConfiguredAssetId] = useState(null);
   const [checkDraft, setCheckDraft] = useState(null);
+  const [configLoading, setConfigLoading] = useState(false);
+  const [configError, setConfigError] = useState("");
+  const [isSavingConfig, setIsSavingConfig] = useState(false);
+  const [runNowAssetId, setRunNowAssetId] = useState(null);
+  const [runNowMessage, setRunNowMessage] = useState(null);
+  const [historyAssetId, setHistoryAssetId] = useState("");
+  const [historySearch, setHistorySearch] = useState("");
+  const [historyRuns, setHistoryRuns] = useState([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState("");
 
   const selectedAsset = assets.find((asset) => asset.id === configuredAssetId) || null;
+  const selectedHistoryAsset = assets.find((asset) => asset.id === historyAssetId) || null;
 
-  function handleSaveAsset() {
+  async function loadAssets() {
+    setAssetsLoading(true);
+    setAssetsError("");
+
+    try {
+      const list = await getAssets();
+
+      const mapped = (list || []).map((item) => ({
+        id: String(item.id),
+        backendId: item.id,
+        name: item.name || "",
+        target: item.asset_value || "",
+        type: item.asset_type,
+        status: normalizeStatus(item.status),
+        checks: createChecksForType(item.asset_type),
+      }));
+
+      const enriched = await Promise.all(
+        mapped.map(async (asset) => {
+          try {
+            const payload = await getAssetChecks(asset.backendId);
+            const checks = createChecksForType(asset.type, payload?.allowed_checks || []);
+
+            (payload?.checks || []).forEach((entry) => {
+              if (!checks[entry.check_type]) return;
+
+              checks[entry.check_type] = {
+                ...checks[entry.check_type],
+                enabled: Boolean(entry.enabled),
+                frequency: entry.frequency ? toUiFrequency(entry.frequency) : null,
+              };
+            });
+
+            return {
+              ...asset,
+              checks,
+              status: normalizeStatus(asset.status) || getStatusFromChecks(checks),
+            };
+          } catch {
+            return {
+              ...asset,
+              status: normalizeStatus(asset.status) || "not_configured",
+            };
+          }
+        })
+      );
+
+      setAssets(enriched);
+    } catch (error) {
+      setAssetsError(error.message || "Failed to load assets");
+    } finally {
+      setAssetsLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    loadAssets();
+  }, []);
+
+  useEffect(() => {
+    if (activeTab === "history" && !historyAssetId && assets.length > 0) {
+      setHistoryAssetId(assets[0].id);
+    }
+  }, [activeTab, assets, historyAssetId]);
+
+  useEffect(() => {
+    if (!selectedHistoryAsset?.backendId) {
+      setHistoryRuns([]);
+      setHistoryError("");
+      return;
+    }
+
+    let cancelled = false;
+
+    async function loadHistory() {
+      setHistoryLoading(true);
+      setHistoryError("");
+
+      try {
+        const payload = await getAssetHistory(selectedHistoryAsset.backendId);
+        if (cancelled) return;
+        setHistoryRuns(payload?.runs || []);
+      } catch (error) {
+        if (cancelled) return;
+        setHistoryRuns([]);
+        setHistoryError(error.message || "Failed to load history");
+      } finally {
+        if (!cancelled) {
+          setHistoryLoading(false);
+        }
+      }
+    }
+
+    loadHistory();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedHistoryAsset?.backendId]);
+
+  async function handleSaveAsset() {
     const target = addForm.target.trim();
     const type = addForm.type;
     const nextErrors = {
@@ -109,23 +282,37 @@ export default function App() {
       return;
     }
 
-    const nextAsset = {
-      id: `asset-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-      name: addForm.name.trim(),
-      target,
-      type,
-      status: "not_configured",
-      checks: createChecksForType(type),
-    };
+    setAddSubmitError("");
+    setIsSavingAsset(true);
 
-    setAssets((prev) => [nextAsset, ...prev]);
-    setAddForm({ name: "", target: "", type: "" });
-    setAddErrors({ target: "", type: "" });
-    setIsAddAssetOpen(false);
+    try {
+      await createAsset({
+        name: addForm.name.trim() || target,
+        asset_type: type,
+        asset_value: target,
+      });
+
+      setAddForm({ name: "", target: "", type: "" });
+      setAddErrors({ target: "", type: "" });
+      setIsAddAssetOpen(false);
+      await loadAssets();
+    } catch (error) {
+      setAddSubmitError(error.message || "Failed to save asset");
+    } finally {
+      setIsSavingAsset(false);
+    }
   }
 
-  function handleRemoveAsset(assetId) {
-    setAssets((prev) => prev.filter((asset) => asset.id !== assetId));
+  async function handleRemoveAsset(assetId) {
+    const targetAsset = assets.find((asset) => asset.id === assetId);
+    if (!targetAsset) return;
+
+    try {
+      await deleteAsset(targetAsset.backendId);
+      setAssets((prev) => prev.filter((asset) => asset.id !== assetId));
+    } catch (error) {
+      setAssetsError(error.message || "Failed to remove asset");
+    }
 
     if (configuredAssetId === assetId) {
       setConfiguredAssetId(null);
@@ -133,9 +320,32 @@ export default function App() {
     }
   }
 
-  function openConfigureChecks(asset) {
+  async function openConfigureChecks(asset) {
     setConfiguredAssetId(asset.id);
-    setCheckDraft(structuredClone(asset.checks));
+    setConfigError("");
+    setConfigLoading(true);
+
+    try {
+      const payload = await getAssetChecks(asset.backendId);
+      const checks = createChecksForType(asset.type, payload?.allowed_checks || []);
+
+      (payload?.checks || []).forEach((entry) => {
+        if (!checks[entry.check_type]) return;
+
+        checks[entry.check_type] = {
+          ...checks[entry.check_type],
+          enabled: Boolean(entry.enabled),
+          frequency: entry.frequency ? toUiFrequency(entry.frequency) : null,
+        };
+      });
+
+      setCheckDraft(checks);
+    } catch (error) {
+      setCheckDraft(structuredClone(asset.checks));
+      setConfigError(error.message || "Failed to load checks");
+    } finally {
+      setConfigLoading(false);
+    }
   }
 
   function handleToggleCheck(checkKey, enabled) {
@@ -167,27 +377,83 @@ export default function App() {
     });
   }
 
-  function handleSaveConfiguration() {
+  async function handleSaveConfiguration() {
     if (!selectedAsset || !checkDraft) {
       return;
     }
 
-    const status = getStatusFromChecks(checkDraft);
+    setIsSavingConfig(true);
+    setConfigError("");
 
-    setAssets((prev) =>
-      prev.map((asset) =>
-        asset.id === selectedAsset.id
-          ? {
-              ...asset,
-              checks: checkDraft,
-              status,
-            }
-          : asset
-      )
-    );
+    try {
+      const checksPayload = checkDefinitions
+        .map((definition) => ({
+          check_type: definition.key,
+          enabled: Boolean(checkDraft[definition.key]?.enabled),
+          frequency:
+            checkDraft[definition.key]?.enabled && checkDraft[definition.key]?.frequency
+              ? toApiFrequency(checkDraft[definition.key].frequency)
+              : null,
+          available: Boolean(checkDraft[definition.key]?.available),
+        }))
+        .filter((item) => item.available)
+        .map(({ check_type, enabled, frequency }) => ({
+          check_type,
+          enabled,
+          frequency,
+        }));
 
-    setConfiguredAssetId(null);
-    setCheckDraft(null);
+      await saveAssetChecks(selectedAsset.backendId, { checks: checksPayload });
+
+      const status = getStatusFromChecks(checkDraft);
+
+      setAssets((prev) =>
+        prev.map((asset) =>
+          asset.id === selectedAsset.id
+            ? {
+                ...asset,
+                checks: checkDraft,
+                status,
+              }
+            : asset
+        )
+      );
+
+      setConfiguredAssetId(null);
+      setCheckDraft(null);
+    } catch (error) {
+      setConfigError(error.message || "Failed to save configuration");
+    } finally {
+      setIsSavingConfig(false);
+    }
+  }
+
+  function canRunNow(asset) {
+    return asset.type === "host" && Boolean(asset.checks?.ports?.enabled);
+  }
+
+  async function handleRunNow(asset) {
+    if (!canRunNow(asset) || !asset.backendId) {
+      return;
+    }
+
+    setRunNowMessage(null);
+    setRunNowAssetId(asset.id);
+
+    try {
+      const response = await runAssetNow(asset.backendId);
+      setRunNowMessage({
+        type: "success",
+        text: response?.summary || "Run started successfully",
+      });
+    } catch (error) {
+      setRunNowMessage({
+        type: "error",
+        text: error.message || "Run Now failed",
+      });
+    } finally {
+      setRunNowAssetId(null);
+    }
   }
 
   function renderActivePage() {
@@ -248,7 +514,22 @@ export default function App() {
             </button>
           </div>
 
-          {assets.length === 0 ? (
+          {assetsError ? <p className="mb-4 text-sm text-red-300">{assetsError}</p> : null}
+          {runNowMessage ? (
+            <p
+              className={`mb-4 text-sm ${
+                runNowMessage.type === "success" ? "text-emerald-300" : "text-red-300"
+              }`}
+            >
+              {runNowMessage.text}
+            </p>
+          ) : null}
+
+          {assetsLoading ? (
+            <div className="rounded-xl border border-red-500/20 bg-zinc-950/35 p-8 text-zinc-400">
+              Loading assets...
+            </div>
+          ) : assets.length === 0 ? (
             <div className="rounded-xl border border-red-500/20 bg-zinc-950/35 p-8 text-zinc-400">
               No assets yet. Add your first asset to start monitoring.
             </div>
@@ -258,9 +539,11 @@ export default function App() {
                 const enabledChecks = Object.values(asset.checks).filter(
                   (check) => check.available && check.enabled && check.frequency
                 ).length;
+                const isRunNowEligible = canRunNow(asset);
+                const isRunNowLoading = runNowAssetId === asset.id;
 
                 const statusLabel =
-                  asset.status === "monitoring_enabled" ? "Monitoring enabled" : "Not configured";
+                  asset.status === "configured" ? "Configured" : "Not configured";
 
                 return (
                   <article
@@ -281,7 +564,7 @@ export default function App() {
                         <span>Status</span>
                         <span
                           className={
-                            asset.status === "monitoring_enabled" ? "text-emerald-300" : "text-amber-300"
+                            asset.status === "configured" ? "text-emerald-300" : "text-amber-300"
                           }
                         >
                           {statusLabel}
@@ -303,10 +586,15 @@ export default function App() {
                       </button>
                       <button
                         type="button"
-                        disabled
-                        className="cursor-not-allowed rounded-md border border-zinc-700 bg-zinc-900/60 px-3 py-2 text-sm font-medium text-zinc-500"
+                        onClick={() => handleRunNow(asset)}
+                        disabled={!isRunNowEligible || Boolean(runNowAssetId)}
+                        className={`rounded-md border px-3 py-2 text-sm font-medium ${
+                          !isRunNowEligible || Boolean(runNowAssetId)
+                            ? "cursor-not-allowed border-zinc-700 bg-zinc-900/60 text-zinc-500"
+                            : "border-red-500/35 bg-red-500/15 text-red-200 transition hover:bg-red-500/25"
+                        }`}
                       >
-                        Run Now
+                        {isRunNowLoading ? "Running..." : "Run Now"}
                       </button>
                       <button
                         type="button"
@@ -319,6 +607,91 @@ export default function App() {
                   </article>
                 );
               })}
+            </div>
+          )}
+        </>
+      );
+    }
+
+    if (activeTab === "history") {
+      const query = historySearch.trim().toLowerCase();
+      const filteredRuns = query
+        ? historyRuns.filter((run) => {
+            const summary = (run.summary || "").toLowerCase();
+            const status = (run.status || "").toLowerCase();
+            const checkType = (run.check_type || "").toLowerCase();
+            return summary.includes(query) || status.includes(query) || checkType.includes(query);
+          })
+        : historyRuns;
+
+      return (
+        <>
+          <PageHeading
+            title="History"
+            subtitle="Execution history by selected asset."
+          />
+
+          <div className="mb-6 grid grid-cols-1 gap-3 md:grid-cols-2">
+            <select
+              value={historyAssetId}
+              onChange={(e) => setHistoryAssetId(e.target.value)}
+              className="rounded-md border border-zinc-700 bg-zinc-900/70 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-red-400/60"
+              disabled={assetsLoading || assets.length === 0}
+            >
+              {assets.length === 0 ? (
+                <option value="">No assets available</option>
+              ) : (
+                assets.map((asset) => (
+                  <option key={asset.id} value={asset.id}>
+                    {(asset.name || asset.target) + " • " + asset.target}
+                  </option>
+                ))
+              )}
+            </select>
+
+            <input
+              value={historySearch}
+              onChange={(e) => setHistorySearch(e.target.value)}
+              placeholder="Search by summary, status, check type"
+              className="rounded-md border border-zinc-700 bg-zinc-900/70 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-red-400/60"
+            />
+          </div>
+
+          {historyError ? <p className="mb-4 text-sm text-red-300">{historyError}</p> : null}
+
+          {!historyAssetId ? (
+            <div className="rounded-xl border border-red-500/20 bg-zinc-950/35 p-8 text-zinc-400">
+              Select an asset to view history.
+            </div>
+          ) : historyLoading ? (
+            <div className="rounded-xl border border-red-500/20 bg-zinc-950/35 p-8 text-zinc-400">
+              Loading history...
+            </div>
+          ) : filteredRuns.length === 0 ? (
+            <div className="rounded-xl border border-red-500/20 bg-zinc-950/35 p-8 text-zinc-400">
+              No history entries for this asset.
+            </div>
+          ) : (
+            <div className="space-y-3">
+              {filteredRuns.map((run) => (
+                <article
+                  key={run.id}
+                  className="rounded-xl border border-red-500/20 bg-zinc-950/35 p-5 shadow-[inset_0_0_16px_-10px_rgba(185,28,28,0.28)]"
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <p className="text-sm uppercase tracking-[0.16em] text-zinc-400">{run.check_type}</p>
+                    <span className="text-xs uppercase tracking-[0.14em] text-zinc-500">{run.status}</span>
+                  </div>
+
+                  <p className="mt-2 text-sm text-zinc-200">{run.summary || "No summary"}</p>
+
+                  <div className="mt-4 grid grid-cols-1 gap-1 text-xs text-zinc-500 md:grid-cols-3">
+                    <p>Started: {run.started_at || "-"}</p>
+                    <p>Finished: {run.finished_at || "-"}</p>
+                    <p>Created: {run.created_at || "-"}</p>
+                  </div>
+                </article>
+              ))}
             </div>
           )}
         </>
@@ -490,12 +863,15 @@ export default function App() {
               </div>
             </div>
 
+            {addSubmitError ? <p className="mt-3 text-sm text-red-300">{addSubmitError}</p> : null}
+
             <div className="mt-6 flex justify-end gap-2">
               <button
                 type="button"
                 onClick={() => {
                   setIsAddAssetOpen(false);
                   setAddErrors({ target: "", type: "" });
+                  setAddSubmitError("");
                 }}
                 className="rounded-md border border-zinc-700 bg-zinc-900 px-4 py-2 text-sm text-zinc-300"
               >
@@ -504,9 +880,10 @@ export default function App() {
               <button
                 type="button"
                 onClick={handleSaveAsset}
+                disabled={isSavingAsset}
                 className="rounded-md border border-red-500/40 bg-red-500/15 px-4 py-2 text-sm font-semibold text-red-200"
               >
-                Save Asset
+                {isSavingAsset ? "Saving..." : "Save Asset"}
               </button>
             </div>
           </div>
@@ -521,7 +898,15 @@ export default function App() {
               {selectedAsset.name || selectedAsset.target} • {getAssetTypeLabel(selectedAsset.type)}
             </p>
 
+            {configError ? <p className="mt-3 text-sm text-red-300">{configError}</p> : null}
+
             <div className="mt-5 space-y-3">
+              {configLoading ? (
+                <div className="rounded-lg border border-zinc-800 bg-zinc-950/60 p-4 text-zinc-400">
+                  Loading checks...
+                </div>
+              ) : null}
+
               {checkDefinitions.map((definition) => {
                 const check = checkDraft[definition.key];
 
@@ -543,7 +928,7 @@ export default function App() {
                           <input
                             type="checkbox"
                             checked={check.enabled}
-                            disabled={!check.available}
+                            disabled={!check.available || configLoading || isSavingConfig}
                             onChange={(e) => handleToggleCheck(definition.key, e.target.checked)}
                             className="h-4 w-4 accent-red-500 disabled:accent-zinc-700"
                           />
@@ -552,7 +937,7 @@ export default function App() {
 
                         <select
                           value={check.frequency || ""}
-                          disabled={!check.available || !check.enabled}
+                          disabled={!check.available || !check.enabled || configLoading || isSavingConfig}
                           onChange={(e) => handleFrequencyChange(definition.key, e.target.value)}
                           className="rounded-md border border-zinc-700 bg-zinc-900/70 px-3 py-2 text-sm text-zinc-100 disabled:cursor-not-allowed disabled:opacity-40"
                         >
@@ -584,9 +969,10 @@ export default function App() {
               <button
                 type="button"
                 onClick={handleSaveConfiguration}
+                disabled={configLoading || isSavingConfig}
                 className="rounded-md border border-red-500/40 bg-red-500/15 px-4 py-2 text-sm font-semibold text-red-200"
               >
-                Save Configuration
+                {isSavingConfig ? "Saving..." : "Save Configuration"}
               </button>
             </div>
           </div>
