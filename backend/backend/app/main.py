@@ -3,7 +3,6 @@ from datetime import datetime
 
 from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from dotenv import load_dotenv
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 
@@ -23,8 +22,6 @@ from scripts.credential_exposure import (
     check_password_exposure,
     CredentialExposureError,
 )
-
-load_dotenv()
 
 app = FastAPI(title="Argus Backend")
 
