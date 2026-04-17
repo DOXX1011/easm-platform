@@ -10,12 +10,14 @@ from app.db.database import get_db
 from app.models import Asset, AssetCheck, ScanRun
 from app.schemas import AssetCreate, AssetChecksSaveRequest
 from scripts.port_check import run_port_check
+from scripts.tls_check import run_tls_check
+from scripts.email_posture import run_email_posture_check
 
 app = FastAPI(title="Argus Backend")
 
 cors_origins_env = os.getenv(
     "CORS_ORIGINS",
-    "http://192.168.146.129:5173,http://192.168.146.129:5177,http://192.168.146.129:5178,http://localhost:5173,http://127.0.0.1:5173,http://localhost:5177,http://127.0.0.1:5177,http://localhost:5178,http://127.0.0.1:5178"
+    "http://192.168.146.129:5173,http://localhost:5173,http://127.0.0.1:5173,http://localhost:5177,http://127.0.0.1:5177,http://localhost:5178,http://127.0.0.1:5178"
 )
 cors_origins = [origin.strip() for origin in cors_origins_env.split(",") if origin.strip()]
 
@@ -32,7 +34,7 @@ def get_allowed_checks(asset_type: str) -> set[str]:
     mapping = {
         "host": {"ports", "tls"},
         "domain": {"email", "tls"},
-        "website": {"ports", "tls"},
+        "website": {"tls"},
     }
     return mapping.get(asset_type, set())
 
@@ -77,7 +79,6 @@ def create_asset(asset: AssetCreate, db: Session = Depends(get_db)):
         asset_value=asset.asset_value,
         status="not_configured"
     )
-
     db.add(new_asset)
     db.commit()
     db.refresh(new_asset)
@@ -94,20 +95,17 @@ def create_asset(asset: AssetCreate, db: Session = Depends(get_db)):
 @app.delete("/assets/{asset_id}")
 def delete_asset(asset_id: int, db: Session = Depends(get_db)):
     asset = db.query(Asset).filter(Asset.id == asset_id).first()
-
     if not asset:
         raise HTTPException(status_code=404, detail="Asset not found")
 
     db.delete(asset)
     db.commit()
-
     return {"message": f"Asset {asset_id} deleted successfully"}
 
 
 @app.get("/assets/{asset_id}/checks")
 def get_asset_checks(asset_id: int, db: Session = Depends(get_db)):
     asset = db.query(Asset).filter(Asset.id == asset_id).first()
-
     if not asset:
         raise HTTPException(status_code=404, detail="Asset not found")
 
@@ -132,7 +130,6 @@ def get_asset_checks(asset_id: int, db: Session = Depends(get_db)):
 @app.post("/assets/{asset_id}/checks")
 def save_asset_checks(asset_id: int, payload: AssetChecksSaveRequest, db: Session = Depends(get_db)):
     asset = db.query(Asset).filter(Asset.id == asset_id).first()
-
     if not asset:
         raise HTTPException(status_code=404, detail="Asset not found")
 
@@ -159,13 +156,14 @@ def save_asset_checks(asset_id: int, payload: AssetChecksSaveRequest, db: Sessio
             existing.enabled = item.enabled
             existing.frequency = item.frequency
         else:
-            new_check = AssetCheck(
-                asset_id=asset_id,
-                check_type=item.check_type,
-                enabled=item.enabled,
-                frequency=item.frequency
+            db.add(
+                AssetCheck(
+                    asset_id=asset_id,
+                    check_type=item.check_type,
+                    enabled=item.enabled,
+                    frequency=item.frequency
+                )
             )
-            db.add(new_check)
 
     db.commit()
 
@@ -204,75 +202,186 @@ def save_asset_checks(asset_id: int, payload: AssetChecksSaveRequest, db: Sessio
 @app.post("/assets/{asset_id}/run-now")
 def run_now(asset_id: int, db: Session = Depends(get_db)):
     asset = db.query(Asset).filter(Asset.id == asset_id).first()
-
     if not asset:
         raise HTTPException(status_code=404, detail="Asset not found")
 
-    port_check = (
+    enabled_checks = (
         db.query(AssetCheck)
         .filter(
             AssetCheck.asset_id == asset_id,
-            AssetCheck.check_type == "ports",
             AssetCheck.enabled.is_(True)
         )
-        .first()
+        .all()
     )
 
-    if not port_check:
-        raise HTTPException(
-            status_code=400,
-            detail="Run Now currently supports only enabled Port Check"
-        )
+    if not enabled_checks:
+        raise HTTPException(status_code=400, detail="No enabled checks configured for this asset")
 
-    scan_run = ScanRun(
-        asset_id=asset_id,
-        check_type="ports",
-        run_type="manual",
-        status="queued",
-        summary="Manual port check queued"
-    )
-    db.add(scan_run)
-    db.commit()
-    db.refresh(scan_run)
+    results = []
 
-    try:
-        scan_run.status = "running"
-        scan_run.started_at = datetime.utcnow()
-        scan_run.summary = "Manual port check running"
-        db.commit()
+    for check in enabled_checks:
+        if check.check_type == "ports":
+            if asset.asset_type != "host":
+                continue
 
-        result = run_port_check(asset.asset_value)
+            scan_run = ScanRun(
+                asset_id=asset_id,
+                check_type="ports",
+                run_type="manual",
+                status="queued",
+                summary="Manual port check queued"
+            )
+            db.add(scan_run)
+            db.commit()
+            db.refresh(scan_run)
 
-        scan_run.status = "completed"
-        scan_run.finished_at = datetime.utcnow()
-        scan_run.summary = result["summary"]
-        scan_run.evidence = result
-        db.commit()
-        db.refresh(scan_run)
+            try:
+                scan_run.status = "running"
+                scan_run.started_at = datetime.utcnow()
+                scan_run.summary = "Manual port check running"
+                db.commit()
 
-        return {
-            "run_id": scan_run.id,
-            "asset_id": asset_id,
-            "check_type": "ports",
-            "status": scan_run.status,
-            "summary": scan_run.summary,
-            "evidence": scan_run.evidence,
-        }
+                result = run_port_check(asset.asset_value)
 
-    except Exception as exc:
-        scan_run.status = "failed"
-        scan_run.finished_at = datetime.utcnow()
-        scan_run.summary = f"Port check failed: {str(exc)}"
-        scan_run.evidence = {"error": str(exc)}
-        db.commit()
+                scan_run.status = "completed"
+                scan_run.finished_at = datetime.utcnow()
+                scan_run.summary = result["summary"]
+                scan_run.evidence = result
+                db.commit()
+                db.refresh(scan_run)
 
-        raise HTTPException(status_code=500, detail="Port check execution failed")
+                results.append({
+                    "run_id": scan_run.id,
+                    "check_type": "ports",
+                    "status": scan_run.status,
+                    "summary": scan_run.summary,
+                })
+
+            except Exception as exc:
+                scan_run.status = "failed"
+                scan_run.finished_at = datetime.utcnow()
+                scan_run.summary = f"Port check failed: {str(exc)}"
+                scan_run.evidence = {"error": str(exc)}
+                db.commit()
+
+                results.append({
+                    "run_id": scan_run.id,
+                    "check_type": "ports",
+                    "status": "failed",
+                    "summary": scan_run.summary,
+                })
+
+        elif check.check_type == "tls":
+            scan_run = ScanRun(
+                asset_id=asset_id,
+                check_type="tls",
+                run_type="manual",
+                status="queued",
+                summary="Manual TLS/HTTPS check queued"
+            )
+            db.add(scan_run)
+            db.commit()
+            db.refresh(scan_run)
+
+            try:
+                scan_run.status = "running"
+                scan_run.started_at = datetime.utcnow()
+                scan_run.summary = "Manual TLS/HTTPS check running"
+                db.commit()
+
+                result = run_tls_check(asset.asset_value)
+
+                scan_run.status = "completed"
+                scan_run.finished_at = datetime.utcnow()
+                scan_run.summary = result["summary"]
+                scan_run.evidence = result
+                db.commit()
+                db.refresh(scan_run)
+
+                results.append({
+                    "run_id": scan_run.id,
+                    "check_type": "tls",
+                    "status": scan_run.status,
+                    "summary": scan_run.summary,
+                })
+
+            except Exception as exc:
+                scan_run.status = "failed"
+                scan_run.finished_at = datetime.utcnow()
+                scan_run.summary = f"TLS/HTTPS check failed: {str(exc)}"
+                scan_run.evidence = {"error": str(exc)}
+                db.commit()
+
+                results.append({
+                    "run_id": scan_run.id,
+                    "check_type": "tls",
+                    "status": "failed",
+                    "summary": scan_run.summary,
+                })
+
+        elif check.check_type == "email":
+            if asset.asset_type != "domain":
+                continue
+
+            scan_run = ScanRun(
+                asset_id=asset_id,
+                check_type="email",
+                run_type="manual",
+                status="queued",
+                summary="Manual email posture check queued"
+            )
+            db.add(scan_run)
+            db.commit()
+            db.refresh(scan_run)
+
+            try:
+                scan_run.status = "running"
+                scan_run.started_at = datetime.utcnow()
+                scan_run.summary = "Manual email posture check running"
+                db.commit()
+
+                result = run_email_posture_check(asset.asset_value)
+
+                scan_run.status = "completed"
+                scan_run.finished_at = datetime.utcnow()
+                scan_run.summary = result["summary"]
+                scan_run.evidence = result
+                db.commit()
+                db.refresh(scan_run)
+
+                results.append({
+                    "run_id": scan_run.id,
+                    "check_type": "email",
+                    "status": scan_run.status,
+                    "summary": scan_run.summary,
+                })
+
+            except Exception as exc:
+                scan_run.status = "failed"
+                scan_run.finished_at = datetime.utcnow()
+                scan_run.summary = f"Email posture check failed: {str(exc)}"
+                scan_run.evidence = {"error": str(exc)}
+                db.commit()
+
+                results.append({
+                    "run_id": scan_run.id,
+                    "check_type": "email",
+                    "status": "failed",
+                    "summary": scan_run.summary,
+                })
+
+    if not results:
+        raise HTTPException(status_code=400, detail="No supported enabled checks available for Run Now")
+
+    return {
+        "asset_id": asset_id,
+        "results": results,
+    }
 
 
 @app.get("/assets/{asset_id}/history")
 def get_asset_history(asset_id: int, db: Session = Depends(get_db)):
     asset = db.query(Asset).filter(Asset.id == asset_id).first()
-
     if not asset:
         raise HTTPException(status_code=404, detail="Asset not found")
 

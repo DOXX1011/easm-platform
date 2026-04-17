@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Lock, Grid, Box, Mail, KeyRound, Eye, Clock3 } from "lucide-react";
+import { Grid, Box, KeyRound, Eye, Clock3 } from "lucide-react";
 import {
   getAssets,
   createAsset,
@@ -8,14 +8,14 @@ import {
   saveAssetChecks,
   runAssetNow,
   getAssetHistory,
+  checkCredentialExposureEmail,
+  checkCredentialExposurePassword,
 } from "@/lib/assetsApi";
 
 const navItems = [
   { id: "overview", label: "Home", icon: Grid },
   { id: "assets", label: "Assets", icon: Box },
   { id: "history", label: "History", icon: Clock3 },
-  { id: "email", label: "Email Posture", icon: Mail },
-  { id: "tls", label: "TLS/HTTPS", icon: Lock },
   { id: "credentials", label: "Credential Exposure", icon: KeyRound },
 ];
 
@@ -50,8 +50,8 @@ const checkDefinitions = [
 ];
 
 const availabilityByType = {
-  host: { ports: true, email: false, tls: true },
-  domain: { ports: false, email: true, tls: true },
+  host: { ports: true, email: false, tls: false },
+  domain: { ports: false, email: true, tls: false },
   website: { ports: false, email: false, tls: true },
 };
 
@@ -71,9 +71,9 @@ function getAvailability(type, allowedChecks = null) {
   }
 
   return {
-    ports: allowedChecks.includes("ports"),
-    email: allowedChecks.includes("email"),
-    tls: allowedChecks.includes("tls"),
+    ports: fallback.ports && allowedChecks.includes("ports"),
+    email: fallback.email && allowedChecks.includes("email"),
+    tls: fallback.tls && allowedChecks.includes("tls"),
   };
 }
 
@@ -121,6 +121,419 @@ function getAssetTypeLabel(type) {
   return assetTypeOptions.find((item) => item.value === type)?.label || type;
 }
 
+const serviceLabelMap = {
+  http: "HTTP",
+  https: "HTTPS",
+  "http-alt": "Web Admin",
+  "https-alt": "Secure Admin",
+  ssh: "SSH",
+  smtp: "SMTP",
+  postgresql: "PostgreSQL",
+  mysql: "MySQL",
+  rdp: "RDP",
+  smb: "SMB",
+};
+
+const securityHeaderLabelMap = {
+  "strict-transport-security": "HSTS",
+  "content-security-policy": "Content-Security-Policy",
+  "x-frame-options": "X-Frame-Options",
+  "x-content-type-options": "X-Content-Type-Options",
+  "referrer-policy": "Referrer-Policy",
+  "permissions-policy": "Permissions-Policy",
+};
+
+function formatServiceLabel(service) {
+  if (!service) return "Unknown";
+  return serviceLabelMap[service] || service.toUpperCase();
+}
+
+function formatSecurityHeaderLabel(headerName) {
+  if (!headerName) return "Unknown header";
+
+  const normalized = String(headerName).trim().toLowerCase();
+  if (securityHeaderLabelMap[normalized]) {
+    return securityHeaderLabelMap[normalized];
+  }
+
+  return normalized
+    .split("-")
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join("-");
+}
+
+function normalizeList(value) {
+  if (Array.isArray(value)) {
+    return value.map((item) => String(item).trim()).filter(Boolean);
+  }
+
+  if (typeof value === "string") {
+    return value
+      .split(",")
+      .map((item) => item.trim())
+      .filter(Boolean);
+  }
+
+  return [];
+}
+
+function parseBooleanLike(value) {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") return value > 0;
+
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+
+    if (["true", "yes", "ok", "up", "reachable", "present", "valid", "enabled"].includes(normalized)) {
+      return true;
+    }
+
+    if (["false", "no", "down", "unreachable", "missing", "invalid", "disabled"].includes(normalized)) {
+      return false;
+    }
+  }
+
+  return null;
+}
+
+function firstKnownBoolean(...values) {
+  for (const value of values) {
+    const parsed = parseBooleanLike(value);
+    if (parsed !== null) return parsed;
+  }
+  return null;
+}
+
+function firstMeaningful(...values) {
+  for (const value of values) {
+    if (value === undefined || value === null) continue;
+    if (typeof value === "string" && !value.trim()) continue;
+    return value;
+  }
+  return null;
+}
+
+function uniqueList(values) {
+  return [...new Set(values.map((value) => String(value).trim()).filter(Boolean))];
+}
+
+function extractHeaderPosture(headersData) {
+  if (!headersData || typeof headersData !== "object") {
+    return { present: [], missing: [], presentRaw: [], missingRaw: [] };
+  }
+
+  const explicitMissing = normalizeList(
+    headersData?.missing_headers ?? headersData?.missing ?? headersData?.absent
+  );
+  const explicitPresent = normalizeList(
+    headersData?.present_headers ?? headersData?.present ?? headersData?.detected
+  );
+
+  const present = [...explicitPresent];
+  const missing = [...explicitMissing];
+
+  const explicitKeys = new Set([
+    "present",
+    "present_headers",
+    "detected",
+    "missing",
+    "missing_headers",
+    "absent",
+  ]);
+
+  Object.entries(headersData).forEach(([key, value]) => {
+    if (explicitKeys.has(key)) return;
+
+    const parsed = parseBooleanLike(value);
+    if (parsed === true) {
+      present.push(key);
+    }
+    if (parsed === false) {
+      missing.push(key);
+    }
+  });
+
+  const presentRaw = uniqueList(present);
+  const missingRaw = uniqueList(missing);
+
+  return {
+    present: presentRaw.map(formatSecurityHeaderLabel),
+    missing: missingRaw.map(formatSecurityHeaderLabel),
+    presentRaw,
+    missingRaw,
+  };
+}
+
+function formatCertificateParty(value, { preferIssuer = false } = {}) {
+  if (value === undefined || value === null) return "-";
+
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) return "-";
+
+    const cnMatch = trimmed.match(/(?:^|[,/])\s*CN\s*=\s*([^,/]+)/i);
+    const orgMatch = trimmed.match(/(?:^|[,/])\s*O\s*=\s*([^,/]+)/i);
+
+    if (preferIssuer && orgMatch && cnMatch) {
+      return `${orgMatch[1].trim()} (${cnMatch[1].trim()})`;
+    }
+
+    if (cnMatch) {
+      return cnMatch[1].trim();
+    }
+
+    return trimmed;
+  }
+
+  if (typeof value === "object") {
+    const cn = firstMeaningful(value.CN, value.cn, value.common_name, value.commonName);
+    const org = firstMeaningful(
+      value.O,
+      value.o,
+      value.organization,
+      value.organisation,
+      value.org,
+      value.company
+    );
+
+    if (preferIssuer && org && cn) {
+      return `${org} (${cn})`;
+    }
+
+    if (cn) {
+      return String(cn);
+    }
+
+    if (org) {
+      return String(org);
+    }
+
+    const firstString = Object.values(value).find(
+      (entry) => typeof entry === "string" && entry.trim()
+    );
+
+    return firstString ? String(firstString).trim() : "-";
+  }
+
+  return String(value);
+}
+
+function formatHistoryDate(value) {
+  if (!value) return "-";
+
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return String(value);
+  }
+
+  return new Intl.DateTimeFormat("en-GB", {
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+  }).format(parsed);
+}
+
+function formatHistoryDateTime(value) {
+  if (!value) return "-";
+
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return String(value);
+  }
+
+  return new Intl.DateTimeFormat("en-GB", {
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).format(parsed);
+}
+
+function getHistoryCheckLabel(checkType) {
+  if (checkType === "ports") return "PORTS";
+  if (checkType === "tls") return "TLS";
+  return String(checkType || "unknown").toUpperCase();
+}
+
+function getScanTimeValue(run) {
+  return firstMeaningful(run?.finished_at, run?.started_at, run?.created_at);
+}
+
+function getRunTimeMs(run) {
+  const value = getScanTimeValue(run);
+  if (!value) return 0;
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? 0 : parsed.getTime();
+}
+
+function getTlsDetails(evidence) {
+  const httpData = evidence?.http && typeof evidence.http === "object" ? evidence.http : null;
+  const httpsData = evidence?.https && typeof evidence.https === "object" ? evidence.https : null;
+  const tlsData = evidence?.tls && typeof evidence.tls === "object" ? evidence.tls : null;
+  const headersData =
+    evidence?.headers && typeof evidence.headers === "object" ? evidence.headers : null;
+
+  const httpReachable = firstKnownBoolean(
+    httpData?.reachable,
+    httpData?.available,
+    httpData?.ok,
+    httpData?.status
+  );
+
+  const httpsReachable = firstKnownBoolean(
+    httpsData?.reachable,
+    httpsData?.available,
+    httpsData?.ok,
+    httpsData?.status,
+    tlsData?.https_available
+  );
+
+  const redirectToHttps = firstKnownBoolean(
+    httpData?.redirect_to_https,
+    httpsData?.redirect_from_http,
+    tlsData?.redirect_to_https,
+    tlsData?.http_redirects_to_https
+  );
+
+  const certData =
+    tlsData?.certificate && typeof tlsData.certificate === "object" ? tlsData.certificate : null;
+
+  const certificatePresent = firstKnownBoolean(
+    certData?.present,
+    tlsData?.certificate_present,
+    tlsData?.present
+  );
+
+  const certificateValid = firstKnownBoolean(
+    certData?.valid,
+    tlsData?.certificate_valid,
+    tlsData?.valid
+  );
+
+  const certificateSubject = formatCertificateParty(
+    firstMeaningful(certData?.subject, tlsData?.subject)
+  );
+  const certificateIssuer = formatCertificateParty(
+    firstMeaningful(certData?.issuer, tlsData?.issuer),
+    { preferIssuer: true }
+  );
+  const certificateExpiry = firstMeaningful(
+    certData?.expiry,
+    certData?.expires_at,
+    tlsData?.expiry,
+    tlsData?.expires_at
+  );
+  const daysUntilExpiry = firstMeaningful(
+    certData?.days_until_expiry,
+    certData?.days_left,
+    tlsData?.days_until_expiry,
+    tlsData?.days_left
+  );
+
+  const headerPosture = extractHeaderPosture(headersData);
+
+  return {
+    connectivity: {
+      httpReachable,
+      httpsReachable,
+      redirectToHttps,
+    },
+    certificate: {
+      present: certificatePresent,
+      valid: certificateValid,
+      subject: certificateSubject,
+      issuer: certificateIssuer,
+      expiry: certificateExpiry,
+      daysUntilExpiry,
+    },
+    headers: {
+      present: headerPosture.present,
+      missing: headerPosture.missing,
+      presentRaw: headerPosture.presentRaw,
+      missingRaw: headerPosture.missingRaw,
+    },
+  };
+}
+
+function getTlsSummaryItems(run) {
+  const evidence = run.evidence && typeof run.evidence === "object" ? run.evidence : null;
+  const tlsDetails = getTlsDetails(evidence);
+  const items = [];
+
+  if (tlsDetails.connectivity.httpsReachable === true) {
+    items.push("HTTPS available");
+  } else if (tlsDetails.connectivity.httpsReachable === false) {
+    items.push("HTTPS unavailable");
+  }
+
+  if (tlsDetails.connectivity.redirectToHttps === true) {
+    items.push("redirect enabled");
+  } else if (tlsDetails.connectivity.redirectToHttps === false) {
+    items.push("redirect missing");
+  }
+
+  if (tlsDetails.certificate.present === true) {
+    if (tlsDetails.certificate.valid === true) {
+      if (tlsDetails.certificate.daysUntilExpiry !== null && tlsDetails.certificate.daysUntilExpiry !== undefined) {
+        items.push(`Certificate valid (${tlsDetails.certificate.daysUntilExpiry} days left)`);
+      } else {
+        items.push("Certificate valid");
+      }
+    } else if (tlsDetails.certificate.valid === false) {
+      items.push("Certificate invalid");
+    } else {
+      items.push("Certificate present");
+    }
+  } else if (tlsDetails.certificate.present === false) {
+    items.push("Certificate not present");
+  }
+
+  if (tlsDetails.headers.missing.length > 0) {
+    items.push(`${tlsDetails.headers.missing.length} security headers missing`);
+  } else if (tlsDetails.headers.present.length > 0) {
+    items.push("security headers complete");
+  }
+
+  if (items.length === 0) {
+    return [run.summary || "TLS check result available"];
+  }
+
+  return items;
+}
+
+function getHistorySummary(run) {
+  if (run.check_type === "tls") {
+    const items = getTlsSummaryItems(run);
+    return items.slice(0, 3).join(", ") || run.summary || "TLS check result available";
+  }
+
+  if (run.check_type !== "ports") {
+    return run.summary || "No summary";
+  }
+
+  const evidence = run.evidence && typeof run.evidence === "object" ? run.evidence : null;
+  const findings = Array.isArray(evidence?.findings) ? evidence.findings : [];
+
+  if (findings.length === 0) {
+    return run.summary || "No summary";
+  }
+
+  const webServices = new Set(["http", "https", "http-alt", "https-alt"]);
+  const allWeb = findings.every((finding) => webServices.has(finding.service));
+
+  if (allWeb) {
+    const ports = findings
+      .map((finding) => finding.port)
+      .filter((port) => port !== undefined && port !== null)
+      .join(", ");
+    return ports ? `Web services detected on ${ports}` : `${findings.length} services detected`;
+  }
+
+  return `${findings.length} services detected`;
+}
+
 function PageHeading({ title, subtitle }) {
   return (
     <div className="mb-8">
@@ -132,12 +545,67 @@ function PageHeading({ title, subtitle }) {
   );
 }
 
-function PlaceholderPanel({ text }) {
-  return (
-    <div className="rounded-xl border border-red-500/20 bg-zinc-950/30 p-8 shadow-[inset_0_0_20px_-10px_rgba(185,28,28,0.3)]">
-      <p className="text-zinc-300">{text}</p>
-    </div>
+function toSafeNonNegativeNumber(value) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return null;
+  return parsed < 0 ? 0 : parsed;
+}
+
+function normalizeCredentialEmailResult(payload) {
+  const breachNames = uniqueList(
+    [
+      ...(Array.isArray(payload?.breach_names) ? payload.breach_names : []),
+      ...(Array.isArray(payload?.breaches)
+        ? payload.breaches.map((entry) => (typeof entry === "string" ? entry : entry?.name))
+        : []),
+    ].filter(Boolean)
   );
+
+  const breachCount =
+    toSafeNonNegativeNumber(
+      firstMeaningful(payload?.breach_count, payload?.count, payload?.total, payload?.hits)
+    ) ?? breachNames.length;
+
+  const statusRaw = String(firstMeaningful(payload?.status, payload?.result, "") || "")
+    .trim()
+    .toLowerCase();
+
+  const foundByStatus = ["found", "exposed", "breached", "hit", "positive"].includes(statusRaw);
+  const found =
+    typeof payload?.found === "boolean"
+      ? payload.found
+      : typeof payload?.exposed === "boolean"
+        ? payload.exposed
+        : foundByStatus || breachCount > 0;
+
+  return {
+    found,
+    breachCount,
+    breachNames,
+  };
+}
+
+function normalizeCredentialPasswordResult(payload) {
+  const occurrenceCount = toSafeNonNegativeNumber(
+    firstMeaningful(payload?.occurrence_count, payload?.count, payload?.hits, payload?.total)
+  );
+
+  const statusRaw = String(firstMeaningful(payload?.status, payload?.result, "") || "")
+    .trim()
+    .toLowerCase();
+
+  const exposedByStatus = ["exposed", "found", "breached", "hit", "positive"].includes(statusRaw);
+  const exposed =
+    typeof payload?.exposed === "boolean"
+      ? payload.exposed
+      : typeof payload?.found === "boolean"
+        ? payload.found
+        : exposedByStatus || (occurrenceCount !== null && occurrenceCount > 0);
+
+  return {
+    exposed,
+    occurrenceCount,
+  };
 }
 
 export default function App() {
@@ -164,6 +632,15 @@ export default function App() {
   const [historyRuns, setHistoryRuns] = useState([]);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState("");
+  const [expandedHistoryRunIds, setExpandedHistoryRunIds] = useState(() => new Set());
+  const [credentialEmail, setCredentialEmail] = useState("");
+  const [credentialEmailLoading, setCredentialEmailLoading] = useState(false);
+  const [credentialEmailError, setCredentialEmailError] = useState("");
+  const [credentialEmailResult, setCredentialEmailResult] = useState(null);
+  const [credentialPassword, setCredentialPassword] = useState("");
+  const [credentialPasswordLoading, setCredentialPasswordLoading] = useState(false);
+  const [credentialPasswordError, setCredentialPasswordError] = useState("");
+  const [credentialPasswordResult, setCredentialPasswordResult] = useState(null);
 
   const selectedAsset = assets.find((asset) => asset.id === configuredAssetId) || null;
   const selectedHistoryAsset = assets.find((asset) => asset.id === historyAssetId) || null;
@@ -237,6 +714,7 @@ export default function App() {
     if (!selectedHistoryAsset?.backendId) {
       setHistoryRuns([]);
       setHistoryError("");
+      setExpandedHistoryRunIds(new Set());
       return;
     }
 
@@ -267,6 +745,10 @@ export default function App() {
       cancelled = true;
     };
   }, [selectedHistoryAsset?.backendId]);
+
+  useEffect(() => {
+    setExpandedHistoryRunIds(new Set());
+  }, [historyAssetId]);
 
   async function handleSaveAsset() {
     const target = addForm.target.trim();
@@ -429,7 +911,23 @@ export default function App() {
   }
 
   function canRunNow(asset) {
-    return asset.type === "host" && Boolean(asset.checks?.ports?.enabled);
+    if (!asset?.checks) {
+      return false;
+    }
+
+    if (asset.type === "host") {
+      return Boolean(asset.checks?.ports?.enabled);
+    }
+
+    if (asset.type === "domain") {
+      return Boolean(asset.checks?.email?.enabled);
+    }
+
+    if (asset.type === "website") {
+      return Boolean(asset.checks?.tls?.enabled);
+    }
+
+    return false;
   }
 
   async function handleRunNow(asset) {
@@ -453,6 +951,62 @@ export default function App() {
       });
     } finally {
       setRunNowAssetId(null);
+    }
+  }
+
+  function toggleHistoryRun(runId) {
+    setExpandedHistoryRunIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(runId)) {
+        next.delete(runId);
+      } else {
+        next.add(runId);
+      }
+      return next;
+    });
+  }
+
+  async function handleCredentialEmailCheck() {
+    const email = credentialEmail.trim();
+
+    if (!email) {
+      setCredentialEmailError("Enter an email address to check.");
+      setCredentialEmailResult(null);
+      return;
+    }
+
+    setCredentialEmailLoading(true);
+    setCredentialEmailError("");
+    setCredentialEmailResult(null);
+
+    try {
+      const payload = await checkCredentialExposureEmail(email);
+      setCredentialEmailResult(normalizeCredentialEmailResult(payload || {}));
+    } catch (error) {
+      setCredentialEmailError(error.message || "Failed to check email exposure");
+    } finally {
+      setCredentialEmailLoading(false);
+    }
+  }
+
+  async function handleCredentialPasswordCheck() {
+    if (!credentialPassword) {
+      setCredentialPasswordError("Enter a password to check.");
+      setCredentialPasswordResult(null);
+      return;
+    }
+
+    setCredentialPasswordLoading(true);
+    setCredentialPasswordError("");
+    setCredentialPasswordResult(null);
+
+    try {
+      const payload = await checkCredentialExposurePassword(credentialPassword);
+      setCredentialPasswordResult(normalizeCredentialPasswordResult(payload || {}));
+    } catch (error) {
+      setCredentialPasswordError(error.message || "Failed to check password exposure");
+    } finally {
+      setCredentialPasswordLoading(false);
     }
   }
 
@@ -615,14 +1169,21 @@ export default function App() {
 
     if (activeTab === "history") {
       const query = historySearch.trim().toLowerCase();
+      const sortedRuns = [...historyRuns].sort((a, b) => getRunTimeMs(b) - getRunTimeMs(a));
       const filteredRuns = query
-        ? historyRuns.filter((run) => {
+        ? sortedRuns.filter((run) => {
             const summary = (run.summary || "").toLowerCase();
             const status = (run.status || "").toLowerCase();
             const checkType = (run.check_type || "").toLowerCase();
-            return summary.includes(query) || status.includes(query) || checkType.includes(query);
+            const friendlySummary = getHistorySummary(run).toLowerCase();
+            return (
+              summary.includes(query) ||
+              status.includes(query) ||
+              checkType.includes(query) ||
+              friendlySummary.includes(query)
+            );
           })
-        : historyRuns;
+        : sortedRuns;
 
       return (
         <>
@@ -660,77 +1221,349 @@ export default function App() {
           {historyError ? <p className="mb-4 text-sm text-red-300">{historyError}</p> : null}
 
           {!historyAssetId ? (
-            <div className="rounded-xl border border-red-500/20 bg-zinc-950/35 p-8 text-zinc-400">
+            <div className="rounded-xl border border-red-500/20 bg-zinc-950/35 p-8 text-sm text-zinc-400 shadow-[inset_0_0_16px_-10px_rgba(185,28,28,0.2)]">
               Select an asset to view history.
             </div>
           ) : historyLoading ? (
-            <div className="rounded-xl border border-red-500/20 bg-zinc-950/35 p-8 text-zinc-400">
+            <div className="rounded-xl border border-red-500/20 bg-zinc-950/35 p-8 text-sm text-zinc-400 shadow-[inset_0_0_16px_-10px_rgba(185,28,28,0.2)]">
               Loading history...
             </div>
           ) : filteredRuns.length === 0 ? (
-            <div className="rounded-xl border border-red-500/20 bg-zinc-950/35 p-8 text-zinc-400">
+            <div className="rounded-xl border border-red-500/20 bg-zinc-950/35 p-8 text-sm text-zinc-400 shadow-[inset_0_0_16px_-10px_rgba(185,28,28,0.2)]">
               No history entries for this asset.
             </div>
           ) : (
             <div className="space-y-3">
-              {filteredRuns.map((run) => (
-                <article
-                  key={run.id}
-                  className="rounded-xl border border-red-500/20 bg-zinc-950/35 p-5 shadow-[inset_0_0_16px_-10px_rgba(185,28,28,0.28)]"
-                >
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <p className="text-sm uppercase tracking-[0.16em] text-zinc-400">{run.check_type}</p>
-                    <span className="text-xs uppercase tracking-[0.14em] text-zinc-500">{run.status}</span>
-                  </div>
+              {filteredRuns.map((run) => {
+                const isExpanded = expandedHistoryRunIds.has(run.id);
+                const evidence = run.evidence && typeof run.evidence === "object" ? run.evidence : null;
+                const findings = Array.isArray(evidence?.findings) ? evidence.findings : [];
+                const tlsDetails = getTlsDetails(evidence);
+                const emailSpf =
+                  evidence?.spf && typeof evidence.spf === "object" ? evidence.spf : null;
+                const emailDmarc =
+                  evidence?.dmarc && typeof evidence.dmarc === "object" ? evidence.dmarc : null;
+                const emailDkim =
+                  evidence?.dkim && typeof evidence.dkim === "object" ? evidence.dkim : null;
+                const emailSpfLabel =
+                  emailSpf?.present === true
+                    ? "Present"
+                    : emailSpf?.present === false
+                      ? "Missing"
+                      : "Unknown";
+                const emailDmarcLabel =
+                  emailDmarc?.present === true
+                    ? "Present"
+                    : emailDmarc?.present === false
+                      ? "Missing"
+                      : "Unknown";
+                const emailDkimLabel =
+                  emailDkim?.present === true
+                    ? "Present"
+                    : emailDkim?.present === false
+                      ? "Not confirmed"
+                      : "Unknown";
+                const emailDmarcPolicy = emailDmarc?.policy || null;
+                const emailDkimSelector = emailDkim?.selector || null;
+                const showEmailSelectorLookupNote = emailDkim?.method === "selector_lookup";
+                const summaryText = getHistorySummary(run);
+                const checkTypeLabel = getHistoryCheckLabel(run.check_type);
+                const statusLabel = String(run.status || "unknown").toUpperCase();
+                const subjectText = tlsDetails.certificate.subject;
+                const issuerText = tlsDetails.certificate.issuer;
+                const showSubject = Boolean(subjectText && subjectText !== "-");
+                const showIssuer = Boolean(issuerText && issuerText !== "-");
 
-                  <p className="mt-2 text-sm text-zinc-200">{run.summary || "No summary"}</p>
+                return (
+                  <article
+                    key={run.id}
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => toggleHistoryRun(run.id)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" || event.key === " ") {
+                        event.preventDefault();
+                        toggleHistoryRun(run.id);
+                      }
+                    }}
+                    className="cursor-pointer rounded-xl border border-red-500/20 bg-zinc-950/35 p-5 shadow-[inset_0_0_16px_-10px_rgba(185,28,28,0.28)]"
+                    aria-expanded={isExpanded}
+                  >
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <p className="text-sm uppercase tracking-[0.16em] text-zinc-500">{checkTypeLabel}</p>
+                      <p className="text-xs uppercase tracking-[0.14em] text-zinc-400">{statusLabel}</p>
+                    </div>
 
-                  <div className="mt-4 grid grid-cols-1 gap-1 text-xs text-zinc-500 md:grid-cols-3">
-                    <p>Started: {run.started_at || "-"}</p>
-                    <p>Finished: {run.finished_at || "-"}</p>
-                    <p>Created: {run.created_at || "-"}</p>
-                  </div>
-                </article>
-              ))}
+                    <p className="mt-2 text-sm text-zinc-100">{summaryText}</p>
+
+                    <div className="mt-4 grid grid-cols-1 gap-1 text-xs text-zinc-500 md:grid-cols-2">
+                      <p>Started: {formatHistoryDateTime(run.started_at)}</p>
+                      <p>Finished: {formatHistoryDateTime(run.finished_at)}</p>
+                    </div>
+
+                    {isExpanded ? (
+                      <div className="mt-4 space-y-3 border-t border-red-500/20 pt-4">
+                        {run.check_type === "ports" ? (
+                          <div>
+                            <p className="mb-2 text-xs uppercase tracking-[0.14em] text-zinc-500">
+                              Services Detected
+                            </p>
+                            {findings.length > 0 ? (
+                              <div className="overflow-x-auto rounded-md border border-zinc-800 bg-zinc-900/50">
+                                <div className="grid grid-cols-[80px_120px_1fr_110px] gap-2 border-b border-zinc-800 px-3 py-2 text-[10px] uppercase tracking-[0.14em] text-zinc-500">
+                                  <span>Port</span>
+                                  <span>Service</span>
+                                  <span>Banner</span>
+                                  <span>Confidence</span>
+                                </div>
+                                {findings.map((finding, index) => (
+                                  <div
+                                    key={`${run.id}-${index}`}
+                                    className="grid grid-cols-[80px_120px_1fr_110px] gap-2 border-b border-zinc-800 px-3 py-2 text-sm text-zinc-300 last:border-b-0"
+                                  >
+                                    <span>{finding.port ?? "-"}</span>
+                                    <span>{formatServiceLabel(finding.service)}</span>
+                                    <span className="text-zinc-400">{finding.banner || "no banner"}</span>
+                                    <span>{finding.confidence || "-"}</span>
+                                  </div>
+                                ))}
+                              </div>
+                            ) : (
+                              <p className="text-sm text-zinc-500">No technical details for this run.</p>
+                            )}
+                          </div>
+                        ) : null}
+
+                        {run.check_type === "tls" ? (
+                          <div className="grid grid-cols-1 gap-3 lg:grid-cols-3">
+                            <section className="space-y-1 text-sm text-zinc-300">
+                              <p className="text-xs uppercase tracking-[0.14em] text-zinc-500">
+                                Web Access
+                              </p>
+                              <p>
+                                HTTP reachable: {tlsDetails.connectivity.httpReachable === null ? "Unknown" : tlsDetails.connectivity.httpReachable ? "Yes" : "No"}
+                              </p>
+                              <p>
+                                HTTPS reachable: {tlsDetails.connectivity.httpsReachable === null ? "Unknown" : tlsDetails.connectivity.httpsReachable ? "Yes" : "No"}
+                              </p>
+                              <p>
+                                Redirect to HTTPS: {tlsDetails.connectivity.redirectToHttps === null ? "Unknown" : tlsDetails.connectivity.redirectToHttps ? "Yes" : "No"}
+                              </p>
+                            </section>
+
+                            <section className="space-y-1 text-sm text-zinc-300">
+                              <p className="text-xs uppercase tracking-[0.14em] text-zinc-500">
+                                Certificate
+                              </p>
+                              {showSubject ? <p>Subject: {subjectText}</p> : null}
+                              {showIssuer ? <p>Issuer: {issuerText}</p> : null}
+                              <p>
+                                Expiry: {formatHistoryDate(tlsDetails.certificate.expiry)}
+                              </p>
+                              <p>
+                                Days until expiry: {tlsDetails.certificate.daysUntilExpiry ?? "-"}
+                              </p>
+                            </section>
+
+                            <section className="space-y-2 text-sm text-zinc-300">
+                              <p className="text-xs uppercase tracking-[0.14em] text-zinc-500">
+                                Browser Security Headers
+                              </p>
+                              {tlsDetails.headers.missing.length > 0 ? (
+                                <div>
+                                  <p className="text-xs uppercase tracking-[0.12em] text-zinc-500">
+                                    Missing
+                                  </p>
+                                  <ul className="mt-1 list-disc space-y-1 pl-5 text-zinc-300">
+                                    {tlsDetails.headers.missing.map((header) => (
+                                      <li key={`${run.id}-tech-missing-${header}`}>{header}</li>
+                                    ))}
+                                  </ul>
+                                </div>
+                              ) : null}
+
+                              {tlsDetails.headers.present.length > 0 ? (
+                                <div>
+                                  <p className="text-xs uppercase tracking-[0.12em] text-zinc-500">
+                                    Present
+                                  </p>
+                                  <p className="mt-1 text-zinc-400">{tlsDetails.headers.present.join(", ")}</p>
+                                </div>
+                              ) : null}
+
+                              {tlsDetails.headers.missing.length === 0 &&
+                              tlsDetails.headers.present.length === 0 ? (
+                                <p className="text-zinc-500">No header details available.</p>
+                              ) : null}
+                            </section>
+                          </div>
+                        ) : null}
+
+                        {run.check_type === "email" ? (
+                          <div>
+                            <p className="mb-2 text-xs uppercase tracking-[0.14em] text-zinc-500">
+                              Email Posture
+                            </p>
+                            <div className="grid grid-cols-1 gap-3 lg:grid-cols-3">
+                              <section className="space-y-1 text-sm text-zinc-300">
+                                <p className="text-xs uppercase tracking-[0.14em] text-zinc-500">SPF</p>
+                                <p>{emailSpfLabel}</p>
+                              </section>
+
+                              <section className="space-y-1 text-sm text-zinc-300">
+                                <p className="text-xs uppercase tracking-[0.14em] text-zinc-500">DMARC</p>
+                                <p>{emailDmarcLabel}</p>
+                                {emailDmarcPolicy ? <p>Policy: {emailDmarcPolicy}</p> : null}
+                              </section>
+
+                              <section className="space-y-1 text-sm text-zinc-300">
+                                <p className="text-xs uppercase tracking-[0.14em] text-zinc-500">DKIM</p>
+                                <p>{emailDkimLabel}</p>
+                                {emailDkimSelector ? <p>Selector: {emailDkimSelector}</p> : null}
+                                {showEmailSelectorLookupNote ? (
+                                  <p className="text-xs text-zinc-500">Checked via selector lookup.</p>
+                                ) : null}
+                              </section>
+                            </div>
+                          </div>
+                        ) : null}
+                      </div>
+                    ) : null}
+                  </article>
+                );
+              })}
             </div>
           )}
         </>
       );
     }
 
-    if (activeTab === "email") {
+    if (activeTab === "credentials") {
       return (
         <>
           <PageHeading
-            title="Email Posture"
-            subtitle="Visibility into mail-related external misconfiguration and exposure."
+            title="Credential Exposure"
+            subtitle="Manual checks for leaked email identities and exposed passwords."
           />
-          <PlaceholderPanel text="Email posture checks will appear here" />
+
+          <div className="grid grid-cols-1 gap-6 xl:grid-cols-2">
+            <section className="rounded-xl border border-red-500/20 bg-zinc-950/35 p-6 shadow-[inset_0_0_16px_-10px_rgba(185,28,28,0.28)]">
+              <h3 className="text-lg font-semibold text-zinc-100">Email Breach Check</h3>
+              <p className="mt-1 text-sm text-zinc-400">
+                Check whether an email appears in known breach datasets.
+              </p>
+
+              <div className="mt-4 space-y-3">
+                <input
+                  type="email"
+                  value={credentialEmail}
+                  onChange={(event) => setCredentialEmail(event.target.value)}
+                  placeholder="name@company.com"
+                  className="w-full rounded-md border border-zinc-700 bg-zinc-900/70 px-3 py-2 text-zinc-100 outline-none focus:border-red-400/60"
+                />
+
+                <button
+                  type="button"
+                  onClick={handleCredentialEmailCheck}
+                  disabled={credentialEmailLoading}
+                  className="rounded-md border border-red-500/40 bg-red-500/15 px-4 py-2 text-sm font-semibold text-red-200 transition hover:bg-red-500/25 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {credentialEmailLoading ? "Checking..." : "Check Email"}
+                </button>
+              </div>
+
+              <div className="mt-5 rounded-lg border border-zinc-800 bg-zinc-950/60 p-4">
+                <h4 className="text-xs uppercase tracking-[0.14em] text-zinc-500">Result</h4>
+
+                {credentialEmailError ? (
+                  <p className="mt-2 text-sm text-red-300">{credentialEmailError}</p>
+                ) : credentialEmailResult ? (
+                  <div className="mt-3 space-y-2 text-sm text-zinc-300">
+                    <div className="flex items-center justify-between">
+                      <span className="text-zinc-500">Status</span>
+                      <span className={credentialEmailResult.found ? "text-red-300" : "text-emerald-300"}>
+                        {credentialEmailResult.found ? "Found" : "Not found"}
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-zinc-500">Breach count</span>
+                      <span>{credentialEmailResult.breachCount}</span>
+                    </div>
+
+                    {credentialEmailResult.breachNames.length > 0 ? (
+                      <div>
+                        <p className="mt-2 text-zinc-500">Breaches</p>
+                        <ul className="mt-1 list-inside list-disc space-y-1 text-zinc-200">
+                          {credentialEmailResult.breachNames.map((name) => (
+                            <li key={name}>{name}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    ) : null}
+                  </div>
+                ) : (
+                  <p className="mt-2 text-sm text-zinc-500">No result yet.</p>
+                )}
+              </div>
+            </section>
+
+            <section className="rounded-xl border border-red-500/20 bg-zinc-950/35 p-6 shadow-[inset_0_0_16px_-10px_rgba(185,28,28,0.28)]">
+              <h3 className="text-lg font-semibold text-zinc-100">Password Exposure Check</h3>
+              <p className="mt-1 text-sm text-zinc-400">
+                Check whether a password has appeared in known credential leaks.
+              </p>
+
+              <div className="mt-4 space-y-3">
+                <input
+                  type="password"
+                  value={credentialPassword}
+                  onChange={(event) => setCredentialPassword(event.target.value)}
+                  placeholder="Enter password"
+                  className="w-full rounded-md border border-zinc-700 bg-zinc-900/70 px-3 py-2 text-zinc-100 outline-none focus:border-red-400/60"
+                />
+
+                <button
+                  type="button"
+                  onClick={handleCredentialPasswordCheck}
+                  disabled={credentialPasswordLoading}
+                  className="rounded-md border border-red-500/40 bg-red-500/15 px-4 py-2 text-sm font-semibold text-red-200 transition hover:bg-red-500/25 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {credentialPasswordLoading ? "Checking..." : "Check Password"}
+                </button>
+              </div>
+
+              <div className="mt-5 rounded-lg border border-zinc-800 bg-zinc-950/60 p-4">
+                <h4 className="text-xs uppercase tracking-[0.14em] text-zinc-500">Result</h4>
+
+                {credentialPasswordError ? (
+                  <p className="mt-2 text-sm text-red-300">{credentialPasswordError}</p>
+                ) : credentialPasswordResult ? (
+                  <div className="mt-3 space-y-2 text-sm text-zinc-300">
+                    <div className="flex items-center justify-between">
+                      <span className="text-zinc-500">Status</span>
+                      <span className={credentialPasswordResult.exposed ? "text-red-300" : "text-emerald-300"}>
+                        {credentialPasswordResult.exposed ? "Exposed" : "Not exposed"}
+                      </span>
+                    </div>
+
+                    {credentialPasswordResult.occurrenceCount !== null ? (
+                      <div className="flex items-center justify-between">
+                        <span className="text-zinc-500">Occurrence count</span>
+                        <span>{credentialPasswordResult.occurrenceCount}</span>
+                      </div>
+                    ) : null}
+                  </div>
+                ) : (
+                  <p className="mt-2 text-sm text-zinc-500">No result yet.</p>
+                )}
+              </div>
+            </section>
+          </div>
         </>
       );
     }
 
-    if (activeTab === "tls") {
-      return (
-        <>
-          <PageHeading
-            title="TLS/HTTPS"
-            subtitle="Certificate hygiene, protocol health, and encryption posture at a glance."
-          />
-          <PlaceholderPanel text="TLS/HTTPS posture checks will appear here" />
-        </>
-      );
-    }
-
-    return (
-      <>
-        <PageHeading
-          title="Credential Exposure"
-          subtitle="Monitoring leaked identities and externally exposed credentials."
-        />
-        <PlaceholderPanel text="Credential exposure checks will appear here" />
-      </>
-    );
+    return null;
   }
 
   return (

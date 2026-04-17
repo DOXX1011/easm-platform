@@ -71,3 +71,17 @@ export function runAssetNow(assetId) {
 export function getAssetHistory(assetId) {
   return request(`/assets/${assetId}/history`);
 }
+
+export function checkCredentialExposureEmail(email) {
+  return request("/credential-exposure/email", {
+    method: "POST",
+    body: JSON.stringify({ email }),
+  });
+}
+
+export function checkCredentialExposurePassword(password) {
+  return request("/credential-exposure/password", {
+    method: "POST",
+    body: JSON.stringify({ password }),
+  });
+}
