@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Grid, Box, KeyRound, Eye, Clock3 } from "lucide-react";
+import { Grid, Box, KeyRound, Eye, Clock3, Shield } from "lucide-react";
 import {
   getAssets,
   createAsset,
@@ -509,6 +509,38 @@ function getHistorySummary(run) {
     return items.slice(0, 3).join(", ") || run.summary || "TLS check result available";
   }
 
+  if (run.check_type === "email") {
+    const evidence = run.evidence && typeof run.evidence === "object" ? run.evidence : null;
+
+    const spfData = evidence?.spf && typeof evidence.spf === "object" ? evidence.spf : null;
+    const dmarcData = evidence?.dmarc && typeof evidence.dmarc === "object" ? evidence.dmarc : null;
+    const dkimData = evidence?.dkim && typeof evidence.dkim === "object" ? evidence.dkim : null;
+
+    const spfPresent = parseBooleanLike(spfData?.present) === true;
+    const dmarcPresent = parseBooleanLike(dmarcData?.present) === true;
+    const dkimPresent = parseBooleanLike(dkimData?.present) === true;
+
+    const presentCount = [spfPresent, dmarcPresent, dkimPresent].filter(Boolean).length;
+
+    if (presentCount === 3) {
+      return "SPF, DMARC and DKIM configured";
+    }
+
+    if (presentCount === 2) {
+      if (!spfPresent) return "DMARC and DKIM configured, SPF missing";
+      if (!dmarcPresent) return "SPF and DKIM configured, DMARC missing";
+      return "SPF and DMARC configured, DKIM missing";
+    }
+
+    if (presentCount === 1) {
+      if (spfPresent) return "Only SPF configured";
+      if (dmarcPresent) return "Only DMARC configured";
+      return "Only DKIM configured";
+    }
+
+    return "SPF, DMARC and DKIM missing";
+  }
+
   if (run.check_type !== "ports") {
     return run.summary || "No summary";
   }
@@ -536,11 +568,11 @@ function getHistorySummary(run) {
 
 function PageHeading({ title, subtitle }) {
   return (
-    <div className="mb-8">
-      <h2 className="glow-text-red text-3xl font-black uppercase tracking-tighter text-white">
+    <div className="mb-7">
+      <h2 className="page-title text-3xl font-black uppercase tracking-tight text-white md:text-[2.1rem]">
         {title}
       </h2>
-      <p className="mt-2 text-sm text-zinc-400">{subtitle}</p>
+      <p className="mt-2 max-w-3xl text-sm leading-relaxed text-zinc-400">{subtitle}</p>
     </div>
   );
 }
@@ -609,6 +641,7 @@ function normalizeCredentialPasswordResult(payload) {
 }
 
 export default function App() {
+  const [sidebarLogoError, setSidebarLogoError] = useState(false);
   const [activeTab, setActiveTab] = useState("overview");
   const [assets, setAssets] = useState([]);
   const [assetsLoading, setAssetsLoading] = useState(false);
@@ -1012,36 +1045,25 @@ export default function App() {
 
   function renderActivePage() {
     if (activeTab === "overview") {
+      const configuredAssets = assets.filter((asset) => asset.status === "configured").length;
+      const unconfiguredAssets = Math.max(assets.length - configuredAssets, 0);
+
       return (
         <>
           <PageHeading
             title="Home"
-            subtitle="High-level external posture indicators for your monitored surface."
+            subtitle="Overview of your monitored external security posture."
           />
 
-          <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
-            <section className="group relative overflow-hidden rounded-xl border border-red-500/20 bg-zinc-950/30 p-7 shadow-[inset_0_0_22px_-10px_rgba(185,28,28,0.35)] backdrop-blur-[1px]">
-              <div className="absolute right-0 top-0 bg-red-500 p-1 text-[10px] font-bold text-black">
-                ARC-01
-              </div>
-              <h3 className="glow-text-red mb-3 text-sm font-bold uppercase tracking-wide text-zinc-400">
-                Exposed Assets
-              </h3>
-              <p className="glow-text-red text-5xl font-black italic tracking-tighter text-white">
-                {assets.length}
-              </p>
+          <div className="mx-auto grid w-full max-w-[980px] grid-cols-1 gap-5 md:grid-cols-2">
+            <section className="panel-surface flex min-h-[130px] flex-col justify-between rounded-xl p-6 md:p-7">
+              <p className="text-[11px] uppercase tracking-[0.15em] text-zinc-500">Configured Assets</p>
+              <p className="mt-2 text-3xl font-semibold leading-none text-zinc-100">{configuredAssets}</p>
             </section>
 
-            <section className="group relative overflow-hidden rounded-xl border border-red-500/20 bg-zinc-950/30 p-7 shadow-[inset_0_0_22px_-10px_rgba(185,28,28,0.35)] backdrop-blur-[1px]">
-              <div className="absolute right-0 top-0 bg-red-500 p-1 text-[10px] font-bold text-black">
-                ARC-02
-              </div>
-              <h3 className="glow-text-red mb-3 text-sm font-bold uppercase tracking-wide text-zinc-400">
-                Critical Findings
-              </h3>
-              <p className="glow-text-red text-5xl font-black italic tracking-tighter text-white">
-                12
-              </p>
+            <section className="panel-surface flex min-h-[130px] flex-col justify-between rounded-xl p-6 md:p-7">
+              <p className="text-[11px] uppercase tracking-[0.15em] text-zinc-500">Pending Configuration</p>
+              <p className="mt-2 text-3xl font-semibold leading-none text-zinc-100">{unconfiguredAssets}</p>
             </section>
           </div>
         </>
@@ -1051,18 +1073,18 @@ export default function App() {
     if (activeTab === "assets") {
       return (
         <>
-          <div className="mb-8 flex flex-wrap items-start justify-between gap-4">
+          <div className="mb-7 flex flex-wrap items-start justify-between gap-4">
             <div>
               <PageHeading
                 title="Assets"
-                subtitle="Managed assets and discovered external surface nodes."
+                subtitle="Manage the assets you want to monitor and scan."
               />
             </div>
 
             <button
               type="button"
               onClick={() => setIsAddAssetOpen(true)}
-              className="rounded-md border border-red-500/40 bg-red-500/15 px-4 py-2 text-sm font-semibold text-red-200 transition hover:bg-red-500/25"
+              className="btn-cyber rounded-md px-4 py-2 text-sm font-semibold"
             >
               Add Asset
             </button>
@@ -1080,21 +1102,22 @@ export default function App() {
           ) : null}
 
           {assetsLoading ? (
-            <div className="rounded-xl border border-red-500/20 bg-zinc-950/35 p-8 text-zinc-400">
+            <div className="panel-surface-muted rounded-xl p-8 text-zinc-300">
               Loading assets...
             </div>
           ) : assets.length === 0 ? (
-            <div className="rounded-xl border border-red-500/20 bg-zinc-950/35 p-8 text-zinc-400">
+            <div className="panel-surface-muted rounded-xl p-8 text-zinc-300">
               No assets yet. Add your first asset to start monitoring.
             </div>
           ) : (
-            <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
-              {assets.map((asset) => {
+            <div className="mx-auto grid w-full max-w-[1160px] grid-cols-1 gap-6 md:grid-cols-2 2xl:grid-cols-3">
+              {assets.map((asset, index) => {
                 const enabledChecks = Object.values(asset.checks).filter(
                   (check) => check.available && check.enabled && check.frequency
                 ).length;
                 const isRunNowEligible = canRunNow(asset);
                 const isRunNowLoading = runNowAssetId === asset.id;
+                const isLastOddCardOnTwoCols = assets.length % 2 === 1 && index === assets.length - 1;
 
                 const statusLabel =
                   asset.status === "configured" ? "Configured" : "Not configured";
@@ -1102,39 +1125,62 @@ export default function App() {
                 return (
                   <article
                     key={asset.id}
-                    className="rounded-xl border border-red-500/20 bg-zinc-950/35 p-5 shadow-[inset_0_0_16px_-10px_rgba(185,28,28,0.28)]"
+                    className={`panel-surface min-w-0 flex h-full flex-col rounded-xl p-5 ${isLastOddCardOnTwoCols ? "md:col-span-2 2xl:col-span-1" : ""}`}
                   >
-                    <h3 className="text-lg font-semibold text-zinc-100">
-                      {asset.name || asset.target}
-                    </h3>
-                    <p className="mt-1 font-mono text-sm text-red-300">{asset.target}</p>
+                    <div className="min-w-0">
+                      <h3
+                        className="min-w-0 overflow-hidden text-lg font-semibold leading-tight text-zinc-100"
+                        title={asset.name || asset.target}
+                        style={{
+                          display: "-webkit-box",
+                          WebkitLineClamp: 2,
+                          WebkitBoxOrient: "vertical",
+                        }}
+                      >
+                        {asset.name || asset.target}
+                      </h3>
 
-                    <div className="mt-4 space-y-2 text-xs uppercase tracking-[0.14em] text-zinc-500">
-                      <div className="flex items-center justify-between">
-                        <span>Asset Type</span>
-                        <span className="text-zinc-300">{getAssetTypeLabel(asset.type)}</span>
+                      <p
+                        className="mt-2 min-w-0 overflow-hidden text-ellipsis whitespace-nowrap font-mono text-sm text-zinc-300"
+                        title={asset.target}
+                      >
+                        {asset.target}
+                      </p>
+                    </div>
+
+                    <div className="mt-5 space-y-2.5 text-xs uppercase tracking-[0.12em] text-zinc-500">
+                      <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3">
+                        <span className="min-w-0 truncate">Asset Type:</span>
+                        <span className="max-w-[11rem] truncate text-right font-medium text-zinc-300" title={getAssetTypeLabel(asset.type)}>
+                          {getAssetTypeLabel(asset.type)}
+                        </span>
                       </div>
-                      <div className="flex items-center justify-between">
-                        <span>Status</span>
+                      <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3">
+                        <span className="min-w-0 truncate">Status:</span>
                         <span
-                          className={
+                          className={`max-w-[11rem] truncate text-right ${
                             asset.status === "configured" ? "text-emerald-300" : "text-amber-300"
-                          }
+                          }`}
+                          title={statusLabel}
                         >
                           {statusLabel}
                         </span>
                       </div>
-                      <div className="flex items-center justify-between">
-                        <span>Enabled Checks</span>
-                        <span className="text-zinc-300">{enabledChecks}</span>
+                      <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3">
+                        <span className="min-w-0 truncate">Enabled Checks:</span>
+                        <span className="max-w-[11rem] truncate text-right font-medium tabular-nums text-zinc-300">
+                          {enabledChecks}
+                        </span>
                       </div>
                     </div>
 
-                    <div className="mt-5 grid grid-cols-1 gap-2">
+                    <div className="flex-1" />
+
+                    <div className="mt-6 grid grid-cols-1 gap-3">
                       <button
                         type="button"
                         onClick={() => openConfigureChecks(asset)}
-                        className="rounded-md border border-red-500/35 bg-red-500/15 px-3 py-2 text-sm font-medium text-red-200 transition hover:bg-red-500/25"
+                        className="btn-cyber rounded-md px-3 py-2 text-sm font-medium"
                       >
                         Configure Checks
                       </button>
@@ -1142,10 +1188,10 @@ export default function App() {
                         type="button"
                         onClick={() => handleRunNow(asset)}
                         disabled={!isRunNowEligible || Boolean(runNowAssetId)}
-                        className={`rounded-md border px-3 py-2 text-sm font-medium ${
+                        className={`rounded-md px-3 py-2 text-sm font-medium ${
                           !isRunNowEligible || Boolean(runNowAssetId)
-                            ? "cursor-not-allowed border-zinc-700 bg-zinc-900/60 text-zinc-500"
-                            : "border-red-500/35 bg-red-500/15 text-red-200 transition hover:bg-red-500/25"
+                            ? "cursor-not-allowed border border-zinc-700 bg-zinc-900/60 text-zinc-500"
+                            : "btn-cyber"
                         }`}
                       >
                         {isRunNowLoading ? "Running..." : "Run Now"}
@@ -1153,7 +1199,7 @@ export default function App() {
                       <button
                         type="button"
                         onClick={() => handleRemoveAsset(asset.id)}
-                        className="rounded-md border border-zinc-700 bg-zinc-900/70 px-3 py-2 text-sm font-medium text-zinc-300 transition hover:border-red-400/50 hover:text-red-200"
+                        className="btn-cyber-subtle rounded-md px-3 py-2 text-sm font-medium"
                       >
                         Remove
                       </button>
@@ -1189,14 +1235,14 @@ export default function App() {
         <>
           <PageHeading
             title="History"
-            subtitle="Execution history by selected asset."
+            subtitle="View previous scan results for the selected asset."
           />
 
-          <div className="mb-6 grid grid-cols-1 gap-3 md:grid-cols-2">
+          <div className="mb-5 grid grid-cols-1 gap-3 md:grid-cols-2">
             <select
               value={historyAssetId}
               onChange={(e) => setHistoryAssetId(e.target.value)}
-              className="rounded-md border border-zinc-700 bg-zinc-900/70 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-red-400/60"
+              className="input-cyber rounded-md px-3 py-2 text-sm"
               disabled={assetsLoading || assets.length === 0}
             >
               {assets.length === 0 ? (
@@ -1214,26 +1260,26 @@ export default function App() {
               value={historySearch}
               onChange={(e) => setHistorySearch(e.target.value)}
               placeholder="Search by summary, status, check type"
-              className="rounded-md border border-zinc-700 bg-zinc-900/70 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-red-400/60"
+              className="input-cyber rounded-md px-3 py-2 text-sm"
             />
           </div>
 
           {historyError ? <p className="mb-4 text-sm text-red-300">{historyError}</p> : null}
 
           {!historyAssetId ? (
-            <div className="rounded-xl border border-red-500/20 bg-zinc-950/35 p-8 text-sm text-zinc-400 shadow-[inset_0_0_16px_-10px_rgba(185,28,28,0.2)]">
+            <div className="panel-surface-muted rounded-xl p-8 text-sm text-zinc-300">
               Select an asset to view history.
             </div>
           ) : historyLoading ? (
-            <div className="rounded-xl border border-red-500/20 bg-zinc-950/35 p-8 text-sm text-zinc-400 shadow-[inset_0_0_16px_-10px_rgba(185,28,28,0.2)]">
+            <div className="panel-surface-muted rounded-xl p-8 text-sm text-zinc-300">
               Loading history...
             </div>
           ) : filteredRuns.length === 0 ? (
-            <div className="rounded-xl border border-red-500/20 bg-zinc-950/35 p-8 text-sm text-zinc-400 shadow-[inset_0_0_16px_-10px_rgba(185,28,28,0.2)]">
+            <div className="panel-surface-muted rounded-xl p-8 text-sm text-zinc-300">
               No history entries for this asset.
             </div>
           ) : (
-            <div className="space-y-3">
+            <div className="space-y-2.5">
               {filteredRuns.map((run) => {
                 const isExpanded = expandedHistoryRunIds.has(run.id);
                 const evidence = run.evidence && typeof run.evidence === "object" ? run.evidence : null;
@@ -1269,68 +1315,76 @@ export default function App() {
                 const summaryText = getHistorySummary(run);
                 const checkTypeLabel = getHistoryCheckLabel(run.check_type);
                 const statusLabel = String(run.status || "unknown").toUpperCase();
+                const hasPortsFindings = run.check_type === "ports" && findings.length > 0;
                 const subjectText = tlsDetails.certificate.subject;
                 const issuerText = tlsDetails.certificate.issuer;
                 const showSubject = Boolean(subjectText && subjectText !== "-");
                 const showIssuer = Boolean(issuerText && issuerText !== "-");
+                const handleHistoryToggle = () => toggleHistoryRun(run.id);
+                const handleHistoryToggleKeyDown = (event) => {
+                  if (event.key === "Enter" || event.key === " ") {
+                    event.preventDefault();
+                    toggleHistoryRun(run.id);
+                  }
+                };
 
                 return (
                   <article
                     key={run.id}
-                    role="button"
-                    tabIndex={0}
-                    onClick={() => toggleHistoryRun(run.id)}
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter" || event.key === " ") {
-                        event.preventDefault();
-                        toggleHistoryRun(run.id);
-                      }
-                    }}
-                    className="cursor-pointer rounded-xl border border-red-500/20 bg-zinc-950/35 p-5 shadow-[inset_0_0_16px_-10px_rgba(185,28,28,0.28)]"
+                    role={!isExpanded ? "button" : undefined}
+                    tabIndex={!isExpanded ? 0 : undefined}
+                    onClick={!isExpanded ? handleHistoryToggle : undefined}
+                    onKeyDown={!isExpanded ? handleHistoryToggleKeyDown : undefined}
+                    className={`panel-surface rounded-xl p-4 ${!isExpanded ? "cursor-pointer" : ""}`}
                     aria-expanded={isExpanded}
                   >
-                    <div className="flex flex-wrap items-center justify-between gap-2">
-                      <p className="text-sm uppercase tracking-[0.16em] text-zinc-500">{checkTypeLabel}</p>
-                      <p className="text-xs uppercase tracking-[0.14em] text-zinc-400">{statusLabel}</p>
+                    <div
+                      role={isExpanded ? "button" : undefined}
+                      tabIndex={isExpanded ? 0 : undefined}
+                      onClick={isExpanded ? handleHistoryToggle : undefined}
+                      onKeyDown={isExpanded ? handleHistoryToggleKeyDown : undefined}
+                      className={isExpanded ? "cursor-pointer" : ""}
+                      aria-expanded={isExpanded}
+                    >
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <p className="text-sm uppercase tracking-[0.16em] text-zinc-500">{checkTypeLabel}</p>
+                        <p className="text-xs uppercase tracking-[0.14em] text-zinc-400">{statusLabel}</p>
+                      </div>
+
+                      <p className="mt-1.5 text-sm leading-relaxed text-zinc-100">{summaryText}</p>
+
+                      <div className="mt-2.5 grid grid-cols-1 gap-1 text-xs text-zinc-500 md:grid-cols-2">
+                        <p>Started: {formatHistoryDateTime(run.started_at)}</p>
+                        <p>Finished: {formatHistoryDateTime(run.finished_at)}</p>
+                      </div>
                     </div>
 
-                    <p className="mt-2 text-sm text-zinc-100">{summaryText}</p>
-
-                    <div className="mt-4 grid grid-cols-1 gap-1 text-xs text-zinc-500 md:grid-cols-2">
-                      <p>Started: {formatHistoryDateTime(run.started_at)}</p>
-                      <p>Finished: {formatHistoryDateTime(run.finished_at)}</p>
-                    </div>
-
-                    {isExpanded ? (
-                      <div className="mt-4 space-y-3 border-t border-red-500/20 pt-4">
-                        {run.check_type === "ports" ? (
+                      {isExpanded ? (
+                      <div className="mt-2 space-y-2 border-t border-red-500/20 pt-2">
+                        {hasPortsFindings ? (
                           <div>
                             <p className="mb-2 text-xs uppercase tracking-[0.14em] text-zinc-500">
                               Services Detected
                             </p>
-                            {findings.length > 0 ? (
-                              <div className="overflow-x-auto rounded-md border border-zinc-800 bg-zinc-900/50">
-                                <div className="grid grid-cols-[80px_120px_1fr_110px] gap-2 border-b border-zinc-800 px-3 py-2 text-[10px] uppercase tracking-[0.14em] text-zinc-500">
-                                  <span>Port</span>
-                                  <span>Service</span>
-                                  <span>Banner</span>
-                                  <span>Confidence</span>
-                                </div>
-                                {findings.map((finding, index) => (
-                                  <div
-                                    key={`${run.id}-${index}`}
-                                    className="grid grid-cols-[80px_120px_1fr_110px] gap-2 border-b border-zinc-800 px-3 py-2 text-sm text-zinc-300 last:border-b-0"
-                                  >
-                                    <span>{finding.port ?? "-"}</span>
-                                    <span>{formatServiceLabel(finding.service)}</span>
-                                    <span className="text-zinc-400">{finding.banner || "no banner"}</span>
-                                    <span>{finding.confidence || "-"}</span>
-                                  </div>
-                                ))}
+                            <div className="overflow-x-auto rounded-md border border-zinc-800 bg-zinc-900/50">
+                              <div className="grid grid-cols-[80px_120px_1fr_110px] gap-2 border-b border-zinc-800 px-3 py-2 text-[10px] uppercase tracking-[0.14em] text-zinc-500">
+                                <span>Port</span>
+                                <span>Service</span>
+                                <span>Banner</span>
+                                <span>Confidence</span>
                               </div>
-                            ) : (
-                              <p className="text-sm text-zinc-500">No technical details for this run.</p>
-                            )}
+                              {findings.map((finding, index) => (
+                                <div
+                                  key={`${run.id}-${index}`}
+                                  className="grid grid-cols-[80px_120px_1fr_110px] gap-2 border-b border-zinc-800 px-3 py-2 text-sm text-zinc-300 last:border-b-0"
+                                >
+                                  <span>{finding.port ?? "-"}</span>
+                                  <span>{formatServiceLabel(finding.service)}</span>
+                                  <span className="text-zinc-400">{finding.banner || "no banner"}</span>
+                                  <span>{finding.confidence || "-"}</span>
+                                </div>
+                              ))}
+                            </div>
                           </div>
                         ) : null}
 
@@ -1365,35 +1419,19 @@ export default function App() {
                               </p>
                             </section>
 
-                            <section className="space-y-2 text-sm text-zinc-300">
-                              <p className="text-xs uppercase tracking-[0.14em] text-zinc-500">
-                                Browser Security Headers
-                              </p>
+                            <section className="text-sm text-zinc-300">
                               {tlsDetails.headers.missing.length > 0 ? (
                                 <div>
-                                  <p className="text-xs uppercase tracking-[0.12em] text-zinc-500">
-                                    Missing
+                                  <p className="text-xs uppercase tracking-[0.14em] text-zinc-500 mb-0">
+                                    Browser Security Headers: <span className="text-xs uppercase tracking-[0.12em] text-zinc-500 whitespace-nowrap">Missing</span>
                                   </p>
-                                  <ul className="mt-1 list-disc space-y-1 pl-5 text-zinc-300">
+
+                                  <ul className="mt-2 list-disc space-y-1 pl-5 text-zinc-300">
                                     {tlsDetails.headers.missing.map((header) => (
                                       <li key={`${run.id}-tech-missing-${header}`}>{header}</li>
                                     ))}
                                   </ul>
                                 </div>
-                              ) : null}
-
-                              {tlsDetails.headers.present.length > 0 ? (
-                                <div>
-                                  <p className="text-xs uppercase tracking-[0.12em] text-zinc-500">
-                                    Present
-                                  </p>
-                                  <p className="mt-1 text-zinc-400">{tlsDetails.headers.present.join(", ")}</p>
-                                </div>
-                              ) : null}
-
-                              {tlsDetails.headers.missing.length === 0 &&
-                              tlsDetails.headers.present.length === 0 ? (
-                                <p className="text-zinc-500">No header details available.</p>
                               ) : null}
                             </section>
                           </div>
@@ -1401,28 +1439,22 @@ export default function App() {
 
                         {run.check_type === "email" ? (
                           <div>
-                            <p className="mb-2 text-xs uppercase tracking-[0.14em] text-zinc-500">
-                              Email Posture
-                            </p>
-                            <div className="grid grid-cols-1 gap-3 lg:grid-cols-3">
-                              <section className="space-y-1 text-sm text-zinc-300">
+                            <div className="grid grid-cols-1 gap-3 lg:grid-cols-3 items-start">
+                              <section className="space-y-1 text-sm">
                                 <p className="text-xs uppercase tracking-[0.14em] text-zinc-500">SPF</p>
-                                <p>{emailSpfLabel}</p>
+                                <p className="text-sm text-zinc-100">{emailSpfLabel}</p>
                               </section>
 
-                              <section className="space-y-1 text-sm text-zinc-300">
+                              <section className="space-y-1 text-sm">
                                 <p className="text-xs uppercase tracking-[0.14em] text-zinc-500">DMARC</p>
-                                <p>{emailDmarcLabel}</p>
-                                {emailDmarcPolicy ? <p>Policy: {emailDmarcPolicy}</p> : null}
+                                <p className="text-sm text-zinc-100">{emailDmarcLabel}</p>
+                                {emailDmarcPolicy ? <p className="text-sm text-zinc-100">Policy: {emailDmarcPolicy}</p> : null}
                               </section>
 
-                              <section className="space-y-1 text-sm text-zinc-300">
+                              <section className="space-y-1 text-sm">
                                 <p className="text-xs uppercase tracking-[0.14em] text-zinc-500">DKIM</p>
-                                <p>{emailDkimLabel}</p>
-                                {emailDkimSelector ? <p>Selector: {emailDkimSelector}</p> : null}
-                                {showEmailSelectorLookupNote ? (
-                                  <p className="text-xs text-zinc-500">Checked via selector lookup.</p>
-                                ) : null}
+                                <p className="text-sm text-zinc-100">{emailDkimLabel}</p>
+                                {emailDkimSelector ? <p className="text-sm text-zinc-100">Selector: {emailDkimSelector}</p> : null}
                               </section>
                             </div>
                           </div>
@@ -1443,11 +1475,11 @@ export default function App() {
         <>
           <PageHeading
             title="Credential Exposure"
-            subtitle="Manual checks for leaked email identities and exposed passwords."
+            subtitle="Check whether an email or password has appeared in known leaks."
           />
 
-          <div className="grid grid-cols-1 gap-6 xl:grid-cols-2">
-            <section className="rounded-xl border border-red-500/20 bg-zinc-950/35 p-6 shadow-[inset_0_0_16px_-10px_rgba(185,28,28,0.28)]">
+          <div className="grid grid-cols-1 gap-5 2xl:grid-cols-2">
+            <section className="panel-surface flex h-full flex-col rounded-xl p-6">
               <h3 className="text-lg font-semibold text-zinc-100">Email Breach Check</h3>
               <p className="mt-1 text-sm text-zinc-400">
                 Check whether an email appears in known breach datasets.
@@ -1459,20 +1491,20 @@ export default function App() {
                   value={credentialEmail}
                   onChange={(event) => setCredentialEmail(event.target.value)}
                   placeholder="name@company.com"
-                  className="w-full rounded-md border border-zinc-700 bg-zinc-900/70 px-3 py-2 text-zinc-100 outline-none focus:border-red-400/60"
+                  className="input-cyber w-full rounded-md px-3 py-2"
                 />
 
                 <button
                   type="button"
                   onClick={handleCredentialEmailCheck}
                   disabled={credentialEmailLoading}
-                  className="rounded-md border border-red-500/40 bg-red-500/15 px-4 py-2 text-sm font-semibold text-red-200 transition hover:bg-red-500/25 disabled:cursor-not-allowed disabled:opacity-50"
+                  className="btn-cyber rounded-md px-4 py-2 text-sm font-semibold disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   {credentialEmailLoading ? "Checking..." : "Check Email"}
                 </button>
               </div>
 
-              <div className="mt-5 rounded-lg border border-zinc-800 bg-zinc-950/60 p-4">
+              <div className="panel-surface-muted mt-5 rounded-lg p-4">
                 <h4 className="text-xs uppercase tracking-[0.14em] text-zinc-500">Result</h4>
 
                 {credentialEmailError ? (
@@ -1507,7 +1539,7 @@ export default function App() {
               </div>
             </section>
 
-            <section className="rounded-xl border border-red-500/20 bg-zinc-950/35 p-6 shadow-[inset_0_0_16px_-10px_rgba(185,28,28,0.28)]">
+            <section className="panel-surface flex h-full flex-col rounded-xl p-6">
               <h3 className="text-lg font-semibold text-zinc-100">Password Exposure Check</h3>
               <p className="mt-1 text-sm text-zinc-400">
                 Check whether a password has appeared in known credential leaks.
@@ -1519,20 +1551,20 @@ export default function App() {
                   value={credentialPassword}
                   onChange={(event) => setCredentialPassword(event.target.value)}
                   placeholder="Enter password"
-                  className="w-full rounded-md border border-zinc-700 bg-zinc-900/70 px-3 py-2 text-zinc-100 outline-none focus:border-red-400/60"
+                  className="input-cyber w-full rounded-md px-3 py-2"
                 />
 
                 <button
                   type="button"
                   onClick={handleCredentialPasswordCheck}
                   disabled={credentialPasswordLoading}
-                  className="rounded-md border border-red-500/40 bg-red-500/15 px-4 py-2 text-sm font-semibold text-red-200 transition hover:bg-red-500/25 disabled:cursor-not-allowed disabled:opacity-50"
+                  className="btn-cyber rounded-md px-4 py-2 text-sm font-semibold disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   {credentialPasswordLoading ? "Checking..." : "Check Password"}
                 </button>
               </div>
 
-              <div className="mt-5 rounded-lg border border-zinc-800 bg-zinc-950/60 p-4">
+              <div className="panel-surface-muted mt-5 rounded-lg p-4">
                 <h4 className="text-xs uppercase tracking-[0.14em] text-zinc-500">Result</h4>
 
                 {credentialPasswordError ? (
@@ -1567,17 +1599,15 @@ export default function App() {
   }
 
   return (
-    <div className="min-h-screen bg-black font-sans text-zinc-100">
-      <div className="mx-auto flex min-h-screen w-full max-w-[1200px] flex-col border-x border-red-950/70 bg-[#020204]">
-        <header className="relative h-16 w-full overflow-hidden border-b border-red-500/20">
+    <div className="argus-shell min-h-screen bg-black font-sans text-zinc-100">
+  <div className="mx-auto flex min-h-screen w-full max-w-[1420px] flex-col border-x border-red-900/35 bg-[#0a0d15]/90">
+        <header className="relative h-16 w-full overflow-hidden border-b border-red-500/10">
           <div className="absolute inset-0 bg-[linear-gradient(90deg,rgba(120,0,0,0.18)_0%,rgba(0,0,0,0)_18%,rgba(0,0,0,0)_82%,rgba(120,0,0,0.18)_100%)]" />
           <div className="absolute inset-0 bg-[linear-gradient(to_right,rgba(255,255,255,0.03)_1px,transparent_1px)] bg-[size:36px_36px] opacity-20" />
-          <div className="absolute inset-x-0 bottom-0 h-px bg-gradient-to-r from-transparent via-red-500/60 to-transparent" />
+          <div className="absolute inset-x-0 bottom-0 h-px bg-gradient-to-r from-transparent via-red-500/30 to-transparent" />
 
           <div className="relative z-10 grid h-full grid-cols-[1fr_auto_1fr] items-center px-6">
-            <div className="justify-self-start text-sm font-black uppercase tracking-[0.45em] text-white">
-              ARGUS
-            </div>
+            <div className="w-[110px] justify-self-start" aria-hidden="true" />
 
             <button
               type="button"
@@ -1614,8 +1644,33 @@ export default function App() {
         </header>
 
         <div className="flex min-h-[calc(100vh-64px)] w-full">
-          <aside className="hidden w-60 shrink-0 border-r border-red-950 bg-black/80 pt-6 lg:block">
-            <nav className="space-y-2 px-4">
+          <aside className="sidebar-shell hidden w-[248px] shrink-0 pt-4 lg:block">
+            <div className="sidebar-brand px-4 pb-4">
+              {/*
+                
+              */}
+              <div className="sidebar-logo-slot" aria-hidden="true">
+                {!sidebarLogoError ? (
+                  <img
+                    src="/argus-logo.png"
+                    alt=""
+                    className="sidebar-logo-image"
+                    onError={() => setSidebarLogoError(true)}
+                  />
+                ) : (
+                  <span className="sidebar-logo-fallback">
+                    <Shield className="h-4 w-4 text-red-200" />
+                    <Eye className="sidebar-logo-fallback-eye h-[11px] w-[11px] text-red-100" />
+                  </span>
+                )}
+              </div>
+              <div className="min-w-0">
+                <p className="text-[1.8rem] font-black uppercase leading-none tracking-wide text-white">ARGUS</p>
+                <p className="mt-1 text-[10px] uppercase tracking-[0.18em] text-zinc-500">EASM PLATFORM</p>
+              </div>
+            </div>
+
+            <nav className="space-y-2 px-4 pt-3">
               {navItems.map((item) => {
                 const Icon = item.icon;
                 const isActive = activeTab === item.id;
@@ -1625,22 +1680,18 @@ export default function App() {
                     key={item.id}
                     type="button"
                     onClick={() => setActiveTab(item.id)}
-                    className={`flex w-full items-center gap-3 rounded-md border px-4 py-2.5 text-sm font-medium transition-colors ${
-                      isActive
-                        ? "border-red-500/35 bg-red-950/25 text-red-300"
-                        : "border-transparent text-zinc-500 hover:border-red-500/15 hover:bg-zinc-900/60 hover:text-zinc-200"
-                    }`}
+                    className={`sidebar-nav-btn flex w-full items-center gap-3 rounded-md px-4 py-2.5 text-sm font-medium ${isActive ? "sidebar-nav-btn-active" : ""}`}
                   >
-                    <Icon className={`h-[18px] w-[18px] ${isActive ? "text-red-400" : "text-zinc-500"}`} />
-                    <span>{item.label}</span>
+                    <Icon className={`h-[18px] w-[18px] ${isActive ? "text-red-300" : "text-zinc-500"}`} />
+                    <span className={isActive ? "text-red-100" : "text-zinc-300"}>{item.label}</span>
                   </button>
                 );
               })}
             </nav>
           </aside>
 
-          <main className="cyber-main-embossed relative flex-1 overflow-hidden p-6 lg:p-8">
-            <div className="relative z-10 mx-auto w-full max-w-5xl">
+          <main className="cyber-main-embossed relative flex-1 overflow-hidden p-6 lg:p-7">
+            <div className="relative z-10 mx-auto w-full max-w-[1240px]">
               {renderActivePage()}
             </div>
           </main>
@@ -1649,7 +1700,7 @@ export default function App() {
 
       {isAddAssetOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm">
-          <div className="w-full max-w-md rounded-xl border border-red-500/30 bg-[#0a0a0d] p-6 shadow-[0_0_28px_rgba(127,29,29,0.35)]">
+          <div className="panel-surface w-full max-w-md rounded-xl p-6">
             <h3 className="text-xl font-semibold text-zinc-100">Add Asset</h3>
 
             <div className="mt-5 space-y-4">
@@ -1658,7 +1709,7 @@ export default function App() {
                 <input
                   value={addForm.name}
                   onChange={(e) => setAddForm((prev) => ({ ...prev, name: e.target.value }))}
-                  className="w-full rounded-md border border-zinc-700 bg-zinc-900/70 px-3 py-2 text-zinc-100 outline-none focus:border-red-400/60"
+                  className="input-cyber w-full rounded-md px-3 py-2"
                   placeholder="Optional"
                 />
               </div>
@@ -1670,7 +1721,7 @@ export default function App() {
                   onChange={(e) =>
                     setAddForm((prev) => ({ ...prev, target: e.target.value }))
                   }
-                  className="w-full rounded-md border border-zinc-700 bg-zinc-900/70 px-3 py-2 text-zinc-100 outline-none focus:border-red-400/60"
+                  className="input-cyber w-full rounded-md px-3 py-2"
                   placeholder="IP, domain, or URL"
                 />
                 {addErrors.target ? (
@@ -1683,7 +1734,7 @@ export default function App() {
                 <select
                   value={addForm.type}
                   onChange={(e) => setAddForm((prev) => ({ ...prev, type: e.target.value }))}
-                  className="w-full rounded-md border border-zinc-700 bg-zinc-900/70 px-3 py-2 text-zinc-100 outline-none focus:border-red-400/60"
+                  className="input-cyber w-full rounded-md px-3 py-2"
                 >
                   <option value="">Select type</option>
                   {assetTypeOptions.map((option) => (
@@ -1706,7 +1757,7 @@ export default function App() {
                   setAddErrors({ target: "", type: "" });
                   setAddSubmitError("");
                 }}
-                className="rounded-md border border-zinc-700 bg-zinc-900 px-4 py-2 text-sm text-zinc-300"
+                className="btn-cyber-subtle rounded-md px-4 py-2 text-sm"
               >
                 Cancel
               </button>
@@ -1714,7 +1765,7 @@ export default function App() {
                 type="button"
                 onClick={handleSaveAsset}
                 disabled={isSavingAsset}
-                className="rounded-md border border-red-500/40 bg-red-500/15 px-4 py-2 text-sm font-semibold text-red-200"
+                className="btn-cyber rounded-md px-4 py-2 text-sm font-semibold"
               >
                 {isSavingAsset ? "Saving..." : "Save Asset"}
               </button>
@@ -1725,7 +1776,7 @@ export default function App() {
 
       {selectedAsset && checkDraft && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm">
-          <div className="w-full max-w-2xl rounded-xl border border-red-500/30 bg-[#0a0a0d] p-6 shadow-[0_0_28px_rgba(127,29,29,0.35)]">
+          <div className="panel-surface w-full max-w-2xl rounded-xl p-6">
             <h3 className="text-xl font-semibold text-zinc-100">Configure Checks</h3>
             <p className="mt-1 text-sm text-zinc-400">
               {selectedAsset.name || selectedAsset.target} • {getAssetTypeLabel(selectedAsset.type)}
@@ -1735,7 +1786,7 @@ export default function App() {
 
             <div className="mt-5 space-y-3">
               {configLoading ? (
-                <div className="rounded-lg border border-zinc-800 bg-zinc-950/60 p-4 text-zinc-400">
+                <div className="panel-surface-muted rounded-lg p-4 text-zinc-300">
                   Loading checks...
                 </div>
               ) : null}
@@ -1746,7 +1797,7 @@ export default function App() {
                 return (
                   <div
                     key={definition.key}
-                    className="rounded-lg border border-zinc-800 bg-zinc-950/60 p-4"
+                    className="panel-surface-muted rounded-lg p-4"
                   >
                     <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
                       <div>
@@ -1772,7 +1823,7 @@ export default function App() {
                           value={check.frequency || ""}
                           disabled={!check.available || !check.enabled || configLoading || isSavingConfig}
                           onChange={(e) => handleFrequencyChange(definition.key, e.target.value)}
-                          className="rounded-md border border-zinc-700 bg-zinc-900/70 px-3 py-2 text-sm text-zinc-100 disabled:cursor-not-allowed disabled:opacity-40"
+                          className="input-cyber rounded-md px-3 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-40"
                         >
                           <option value="">Select frequency</option>
                           {frequencyOptions.map((option) => (
@@ -1795,7 +1846,7 @@ export default function App() {
                   setConfiguredAssetId(null);
                   setCheckDraft(null);
                 }}
-                className="rounded-md border border-zinc-700 bg-zinc-900 px-4 py-2 text-sm text-zinc-300"
+                className="btn-cyber-subtle rounded-md px-4 py-2 text-sm"
               >
                 Cancel
               </button>
@@ -1803,7 +1854,7 @@ export default function App() {
                 type="button"
                 onClick={handleSaveConfiguration}
                 disabled={configLoading || isSavingConfig}
-                className="rounded-md border border-red-500/40 bg-red-500/15 px-4 py-2 text-sm font-semibold text-red-200"
+                className="btn-cyber rounded-md px-4 py-2 text-sm font-semibold"
               >
                 {isSavingConfig ? "Saving..." : "Save Configuration"}
               </button>
