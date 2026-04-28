@@ -361,3 +361,4 @@ export function deriveFindingsFromRuns(runs, { getTlsDetails, parseBooleanLike }
 
   return findings;
 }
+}
