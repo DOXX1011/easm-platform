@@ -1,5 +1,13 @@
 import { useEffect, useState } from "react";
 import { Grid, Box, KeyRound, Eye, Clock3, Shield } from "lucide-react";
+import CTIPage from "@/components/cti/CTIPage";
+import HistoryPage from "@/components/history/HistoryPage";
+import CredentialExposurePage from "@/components/credentials/CredentialExposurePage";
+import AddAssetModal from "@/components/modals/AddAssetModal";
+import ConfigureChecksModal from "@/components/modals/ConfigureChecksModal";
+import FindingsBySeverity from "@/components/home/FindingsBySeverity";
+import RecentScanActivity from "@/components/home/RecentScanActivity";
+import { computeHomeMetrics } from "@/components/home/homeHelpers";
 import {
   getAssets,
   createAsset,
@@ -17,6 +25,7 @@ const navItems = [
   { id: "assets", label: "Assets", icon: Box },
   { id: "history", label: "History", icon: Clock3 },
   { id: "credentials", label: "Credential Exposure", icon: KeyRound },
+  { id: "cti", label: "CTI Decision Support", icon: Shield },
 ];
 
 const frequencyOptions = ["1 min", "15 min", "1 hour", "6 hours", "Daily"];
@@ -121,18 +130,19 @@ function getAssetTypeLabel(type) {
   return assetTypeOptions.find((item) => item.value === type)?.label || type;
 }
 
-const serviceLabelMap = {
-  http: "HTTP",
-  https: "HTTPS",
-  "http-alt": "Web Admin",
-  "https-alt": "Secure Admin",
-  ssh: "SSH",
-  smtp: "SMTP",
-  postgresql: "PostgreSQL",
-  mysql: "MySQL",
-  rdp: "RDP",
-  smb: "SMB",
-};
+// Helper: format the display label for an asset in selectors and dropdowns
+function formatAssetOptionLabel(asset) {
+  if (!asset) return "";
+
+  const name = asset.name || asset.target || "";
+  const address = asset.target || asset.name || "";
+  const rawType = String(asset.type || "").toLowerCase();
+  const typeLabel = rawType === "host" ? "Server" : rawType === "website" ? "Website" : rawType === "domain" ? "Domain" : getAssetTypeLabel(rawType);
+
+  return `${name} (${address}) - ${typeLabel}`;
+}
+
+import { formatServiceLabel, formatHistoryDate, formatHistoryDateTime, getHistoryCheckLabel } from "@/components/history/historyHelpers";
 
 const securityHeaderLabelMap = {
   "strict-transport-security": "HSTS",
@@ -142,11 +152,6 @@ const securityHeaderLabelMap = {
   "referrer-policy": "Referrer-Policy",
   "permissions-policy": "Permissions-Policy",
 };
-
-function formatServiceLabel(service) {
-  if (!service) return "Unknown";
-  return serviceLabelMap[service] || service.toUpperCase();
-}
 
 function formatSecurityHeaderLabel(headerName) {
   if (!headerName) return "Unknown header";
@@ -318,44 +323,7 @@ function formatCertificateParty(value, { preferIssuer = false } = {}) {
   return String(value);
 }
 
-function formatHistoryDate(value) {
-  if (!value) return "-";
 
-  const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime())) {
-    return String(value);
-  }
-
-  return new Intl.DateTimeFormat("en-GB", {
-    day: "2-digit",
-    month: "short",
-    year: "numeric",
-  }).format(parsed);
-}
-
-function formatHistoryDateTime(value) {
-  if (!value) return "-";
-
-  const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime())) {
-    return String(value);
-  }
-
-  return new Intl.DateTimeFormat("en-GB", {
-    day: "2-digit",
-    month: "short",
-    year: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-  }).format(parsed);
-}
-
-function getHistoryCheckLabel(checkType) {
-  if (checkType === "ports") return "PORTS";
-  if (checkType === "tls") return "TLS";
-  return String(checkType || "unknown").toUpperCase();
-}
 
 function getScanTimeValue(run) {
   return firstMeaningful(run?.finished_at, run?.started_at, run?.created_at);
@@ -665,6 +633,7 @@ export default function App() {
   const [historyRuns, setHistoryRuns] = useState([]);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState("");
+  
   const [expandedHistoryRunIds, setExpandedHistoryRunIds] = useState(() => new Set());
   const [credentialEmail, setCredentialEmail] = useState("");
   const [credentialEmailLoading, setCredentialEmailLoading] = useState(false);
@@ -674,6 +643,7 @@ export default function App() {
   const [credentialPasswordLoading, setCredentialPasswordLoading] = useState(false);
   const [credentialPasswordError, setCredentialPasswordError] = useState("");
   const [credentialPasswordResult, setCredentialPasswordResult] = useState(null);
+  const [homeMetrics, setHomeMetrics] = useState({ findingsCounts: { High: 0, Medium: 0, Low: 0 }, recentActivity: [] });
 
   const selectedAsset = assets.find((asset) => asset.id === configuredAssetId) || null;
   const selectedHistoryAsset = assets.find((asset) => asset.id === historyAssetId) || null;
@@ -725,7 +695,14 @@ export default function App() {
         })
       );
 
-      setAssets(enriched);
+  setAssets(enriched);
+      try {
+        computeHomeMetrics(enriched, getAssetHistory, getTlsDetails, parseBooleanLike).then((metrics) => {
+          setHomeMetrics(metrics);
+        }).catch(() => {});
+      } catch (e) {
+        // ignore
+      }
     } catch (error) {
       setAssetsError(error.message || "Failed to load assets");
     } finally {
@@ -778,6 +755,8 @@ export default function App() {
       cancelled = true;
     };
   }, [selectedHistoryAsset?.backendId]);
+
+  
 
   useEffect(() => {
     setExpandedHistoryRunIds(new Set());
@@ -1066,6 +1045,10 @@ export default function App() {
               <p className="mt-2 text-3xl font-semibold leading-none text-zinc-100">{unconfiguredAssets}</p>
             </section>
           </div>
+          <div className="mx-auto grid w-full max-w-[980px] grid-cols-1 gap-5 md:grid-cols-2 mt-6">
+            <FindingsBySeverity counts={homeMetrics.findingsCounts || { High: 0, Medium: 0, Low: 0 }} />
+            <RecentScanActivity activity={homeMetrics.recentActivity || []} />
+          </div>
         </>
       );
     }
@@ -1214,384 +1197,61 @@ export default function App() {
     }
 
     if (activeTab === "history") {
-      const query = historySearch.trim().toLowerCase();
-      const sortedRuns = [...historyRuns].sort((a, b) => getRunTimeMs(b) - getRunTimeMs(a));
-      const filteredRuns = query
-        ? sortedRuns.filter((run) => {
-            const summary = (run.summary || "").toLowerCase();
-            const status = (run.status || "").toLowerCase();
-            const checkType = (run.check_type || "").toLowerCase();
-            const friendlySummary = getHistorySummary(run).toLowerCase();
-            return (
-              summary.includes(query) ||
-              status.includes(query) ||
-              checkType.includes(query) ||
-              friendlySummary.includes(query)
-            );
-          })
-        : sortedRuns;
-
       return (
-        <>
-          <PageHeading
-            title="History"
-            subtitle="View previous scan results for the selected asset."
-          />
+        <HistoryPage
+          assets={assets}
+          historyAssetId={historyAssetId}
+          setHistoryAssetId={setHistoryAssetId}
+          historySearch={historySearch}
+          setHistorySearch={setHistorySearch}
+          historyRuns={historyRuns}
+          historyLoading={historyLoading}
+          historyError={historyError}
+          expandedHistoryRunIds={expandedHistoryRunIds}
+          toggleHistoryRun={toggleHistoryRun}
+          formatAssetOptionLabel={formatAssetOptionLabel}
+          getHistorySummary={getHistorySummary}
+          getHistoryCheckLabel={getHistoryCheckLabel}
+          getTlsDetails={getTlsDetails}
+          formatHistoryDate={formatHistoryDate}
+          formatHistoryDateTime={formatHistoryDateTime}
+          formatServiceLabel={formatServiceLabel}
+          getRunTimeMs={getRunTimeMs}
+        />
+      );
+    }
 
-          <div className="mb-5 grid grid-cols-1 gap-3 md:grid-cols-2">
-            <select
-              value={historyAssetId}
-              onChange={(e) => setHistoryAssetId(e.target.value)}
-              className="input-cyber rounded-md px-3 py-2 text-sm"
-              disabled={assetsLoading || assets.length === 0}
-            >
-              {assets.length === 0 ? (
-                <option value="">No assets available</option>
-              ) : (
-                assets.map((asset) => (
-                  <option key={asset.id} value={asset.id}>
-                    {(asset.name || asset.target) + " • " + asset.target}
-                  </option>
-                ))
-              )}
-            </select>
-
-            <input
-              value={historySearch}
-              onChange={(e) => setHistorySearch(e.target.value)}
-              placeholder="Search by summary, status, check type"
-              className="input-cyber rounded-md px-3 py-2 text-sm"
-            />
-          </div>
-
-          {historyError ? <p className="mb-4 text-sm text-red-300">{historyError}</p> : null}
-
-          {!historyAssetId ? (
-            <div className="panel-surface-muted rounded-xl p-8 text-sm text-zinc-300">
-              Select an asset to view history.
-            </div>
-          ) : historyLoading ? (
-            <div className="panel-surface-muted rounded-xl p-8 text-sm text-zinc-300">
-              Loading history...
-            </div>
-          ) : filteredRuns.length === 0 ? (
-            <div className="panel-surface-muted rounded-xl p-8 text-sm text-zinc-300">
-              No history entries for this asset.
-            </div>
-          ) : (
-            <div className="space-y-2.5">
-              {filteredRuns.map((run) => {
-                const isExpanded = expandedHistoryRunIds.has(run.id);
-                const evidence = run.evidence && typeof run.evidence === "object" ? run.evidence : null;
-                const findings = Array.isArray(evidence?.findings) ? evidence.findings : [];
-                const tlsDetails = getTlsDetails(evidence);
-                const emailSpf =
-                  evidence?.spf && typeof evidence.spf === "object" ? evidence.spf : null;
-                const emailDmarc =
-                  evidence?.dmarc && typeof evidence.dmarc === "object" ? evidence.dmarc : null;
-                const emailDkim =
-                  evidence?.dkim && typeof evidence.dkim === "object" ? evidence.dkim : null;
-                const emailSpfLabel =
-                  emailSpf?.present === true
-                    ? "Present"
-                    : emailSpf?.present === false
-                      ? "Missing"
-                      : "Unknown";
-                const emailDmarcLabel =
-                  emailDmarc?.present === true
-                    ? "Present"
-                    : emailDmarc?.present === false
-                      ? "Missing"
-                      : "Unknown";
-                const emailDkimLabel =
-                  emailDkim?.present === true
-                    ? "Present"
-                    : emailDkim?.present === false
-                      ? "Not confirmed"
-                      : "Unknown";
-                const emailDmarcPolicy = emailDmarc?.policy || null;
-                const emailDkimSelector = emailDkim?.selector || null;
-                const showEmailSelectorLookupNote = emailDkim?.method === "selector_lookup";
-                const summaryText = getHistorySummary(run);
-                const checkTypeLabel = getHistoryCheckLabel(run.check_type);
-                const statusLabel = String(run.status || "unknown").toUpperCase();
-                const hasPortsFindings = run.check_type === "ports" && findings.length > 0;
-                const subjectText = tlsDetails.certificate.subject;
-                const issuerText = tlsDetails.certificate.issuer;
-                const showSubject = Boolean(subjectText && subjectText !== "-");
-                const showIssuer = Boolean(issuerText && issuerText !== "-");
-                const handleHistoryToggle = () => toggleHistoryRun(run.id);
-                const handleHistoryToggleKeyDown = (event) => {
-                  if (event.key === "Enter" || event.key === " ") {
-                    event.preventDefault();
-                    toggleHistoryRun(run.id);
-                  }
-                };
-
-                return (
-                  <article
-                    key={run.id}
-                    role={!isExpanded ? "button" : undefined}
-                    tabIndex={!isExpanded ? 0 : undefined}
-                    onClick={!isExpanded ? handleHistoryToggle : undefined}
-                    onKeyDown={!isExpanded ? handleHistoryToggleKeyDown : undefined}
-                    className={`panel-surface rounded-xl p-4 ${!isExpanded ? "cursor-pointer" : ""}`}
-                    aria-expanded={isExpanded}
-                  >
-                    <div
-                      role={isExpanded ? "button" : undefined}
-                      tabIndex={isExpanded ? 0 : undefined}
-                      onClick={isExpanded ? handleHistoryToggle : undefined}
-                      onKeyDown={isExpanded ? handleHistoryToggleKeyDown : undefined}
-                      className={isExpanded ? "cursor-pointer" : ""}
-                      aria-expanded={isExpanded}
-                    >
-                      <div className="flex flex-wrap items-center justify-between gap-2">
-                        <p className="text-sm uppercase tracking-[0.16em] text-zinc-500">{checkTypeLabel}</p>
-                        <p className="text-xs uppercase tracking-[0.14em] text-zinc-400">{statusLabel}</p>
-                      </div>
-
-                      <p className="mt-1.5 text-sm leading-relaxed text-zinc-100">{summaryText}</p>
-
-                      <div className="mt-2.5 grid grid-cols-1 gap-1 text-xs text-zinc-500 md:grid-cols-2">
-                        <p>Started: {formatHistoryDateTime(run.started_at)}</p>
-                        <p>Finished: {formatHistoryDateTime(run.finished_at)}</p>
-                      </div>
-                    </div>
-
-                      {isExpanded ? (
-                      <div className="mt-2 space-y-2 border-t border-red-500/20 pt-2">
-                        {hasPortsFindings ? (
-                          <div>
-                            <p className="mb-2 text-xs uppercase tracking-[0.14em] text-zinc-500">
-                              Services Detected
-                            </p>
-                            <div className="overflow-x-auto rounded-md border border-zinc-800 bg-zinc-900/50">
-                              <div className="grid grid-cols-[80px_120px_1fr_110px] gap-2 border-b border-zinc-800 px-3 py-2 text-[10px] uppercase tracking-[0.14em] text-zinc-500">
-                                <span>Port</span>
-                                <span>Service</span>
-                                <span>Banner</span>
-                                <span>Confidence</span>
-                              </div>
-                              {findings.map((finding, index) => (
-                                <div
-                                  key={`${run.id}-${index}`}
-                                  className="grid grid-cols-[80px_120px_1fr_110px] gap-2 border-b border-zinc-800 px-3 py-2 text-sm text-zinc-300 last:border-b-0"
-                                >
-                                  <span>{finding.port ?? "-"}</span>
-                                  <span>{formatServiceLabel(finding.service)}</span>
-                                  <span className="text-zinc-400">{finding.banner || "no banner"}</span>
-                                  <span>{finding.confidence || "-"}</span>
-                                </div>
-                              ))}
-                            </div>
-                          </div>
-                        ) : null}
-
-                        {run.check_type === "tls" ? (
-                          <div className="grid grid-cols-1 gap-3 lg:grid-cols-3">
-                            <section className="space-y-1 text-sm text-zinc-300">
-                              <p className="text-xs uppercase tracking-[0.14em] text-zinc-500">
-                                Web Access
-                              </p>
-                              <p>
-                                HTTP reachable: {tlsDetails.connectivity.httpReachable === null ? "Unknown" : tlsDetails.connectivity.httpReachable ? "Yes" : "No"}
-                              </p>
-                              <p>
-                                HTTPS reachable: {tlsDetails.connectivity.httpsReachable === null ? "Unknown" : tlsDetails.connectivity.httpsReachable ? "Yes" : "No"}
-                              </p>
-                              <p>
-                                Redirect to HTTPS: {tlsDetails.connectivity.redirectToHttps === null ? "Unknown" : tlsDetails.connectivity.redirectToHttps ? "Yes" : "No"}
-                              </p>
-                            </section>
-
-                            <section className="space-y-1 text-sm text-zinc-300">
-                              <p className="text-xs uppercase tracking-[0.14em] text-zinc-500">
-                                Certificate
-                              </p>
-                              {showSubject ? <p>Subject: {subjectText}</p> : null}
-                              {showIssuer ? <p>Issuer: {issuerText}</p> : null}
-                              <p>
-                                Expiry: {formatHistoryDate(tlsDetails.certificate.expiry)}
-                              </p>
-                              <p>
-                                Days until expiry: {tlsDetails.certificate.daysUntilExpiry ?? "-"}
-                              </p>
-                            </section>
-
-                            <section className="text-sm text-zinc-300">
-                              {tlsDetails.headers.missing.length > 0 ? (
-                                <div>
-                                  <p className="text-xs uppercase tracking-[0.14em] text-zinc-500 mb-0">
-                                    Browser Security Headers: <span className="text-xs uppercase tracking-[0.12em] text-zinc-500 whitespace-nowrap">Missing</span>
-                                  </p>
-
-                                  <ul className="mt-2 list-disc space-y-1 pl-5 text-zinc-300">
-                                    {tlsDetails.headers.missing.map((header) => (
-                                      <li key={`${run.id}-tech-missing-${header}`}>{header}</li>
-                                    ))}
-                                  </ul>
-                                </div>
-                              ) : null}
-                            </section>
-                          </div>
-                        ) : null}
-
-                        {run.check_type === "email" ? (
-                          <div>
-                            <div className="grid grid-cols-1 gap-3 lg:grid-cols-3 items-start">
-                              <section className="space-y-1 text-sm">
-                                <p className="text-xs uppercase tracking-[0.14em] text-zinc-500">SPF</p>
-                                <p className="text-sm text-zinc-100">{emailSpfLabel}</p>
-                              </section>
-
-                              <section className="space-y-1 text-sm">
-                                <p className="text-xs uppercase tracking-[0.14em] text-zinc-500">DMARC</p>
-                                <p className="text-sm text-zinc-100">{emailDmarcLabel}</p>
-                                {emailDmarcPolicy ? <p className="text-sm text-zinc-100">Policy: {emailDmarcPolicy}</p> : null}
-                              </section>
-
-                              <section className="space-y-1 text-sm">
-                                <p className="text-xs uppercase tracking-[0.14em] text-zinc-500">DKIM</p>
-                                <p className="text-sm text-zinc-100">{emailDkimLabel}</p>
-                                {emailDkimSelector ? <p className="text-sm text-zinc-100">Selector: {emailDkimSelector}</p> : null}
-                              </section>
-                            </div>
-                          </div>
-                        ) : null}
-                      </div>
-                    ) : null}
-                  </article>
-                );
-              })}
-            </div>
-          )}
-        </>
+    if (activeTab === "cti") {
+      return (
+        <CTIPage
+          assets={assets}
+          getAssetHistory={getAssetHistory}
+          getTlsDetails={getTlsDetails}
+          parseBooleanLike={parseBooleanLike}
+          formatAssetOptionLabel={formatAssetOptionLabel}
+          getAssetTypeLabel={getAssetTypeLabel}
+        />
       );
     }
 
     if (activeTab === "credentials") {
       return (
-        <>
-          <PageHeading
-            title="Credential Exposure"
-            subtitle="Check whether an email or password has appeared in known leaks."
-          />
-
-          <div className="grid grid-cols-1 gap-5 2xl:grid-cols-2">
-            <section className="panel-surface flex h-full flex-col rounded-xl p-6">
-              <h3 className="text-lg font-semibold text-zinc-100">Email Breach Check</h3>
-              <p className="mt-1 text-sm text-zinc-400">
-                Check whether an email appears in known breach datasets.
-              </p>
-
-              <div className="mt-4 space-y-3">
-                <input
-                  type="email"
-                  value={credentialEmail}
-                  onChange={(event) => setCredentialEmail(event.target.value)}
-                  placeholder="name@company.com"
-                  className="input-cyber w-full rounded-md px-3 py-2"
-                />
-
-                <button
-                  type="button"
-                  onClick={handleCredentialEmailCheck}
-                  disabled={credentialEmailLoading}
-                  className="btn-cyber rounded-md px-4 py-2 text-sm font-semibold disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  {credentialEmailLoading ? "Checking..." : "Check Email"}
-                </button>
-              </div>
-
-              <div className="panel-surface-muted mt-5 rounded-lg p-4">
-                <h4 className="text-xs uppercase tracking-[0.14em] text-zinc-500">Result</h4>
-
-                {credentialEmailError ? (
-                  <p className="mt-2 text-sm text-red-300">{credentialEmailError}</p>
-                ) : credentialEmailResult ? (
-                  <div className="mt-3 space-y-2 text-sm text-zinc-300">
-                    <div className="flex items-center justify-between">
-                      <span className="text-zinc-500">Status</span>
-                      <span className={credentialEmailResult.found ? "text-red-300" : "text-emerald-300"}>
-                        {credentialEmailResult.found ? "Found" : "Not found"}
-                      </span>
-                    </div>
-                    <div className="flex items-center justify-between">
-                      <span className="text-zinc-500">Breach count</span>
-                      <span>{credentialEmailResult.breachCount}</span>
-                    </div>
-
-                    {credentialEmailResult.breachNames.length > 0 ? (
-                      <div>
-                        <p className="mt-2 text-zinc-500">Breaches</p>
-                        <ul className="mt-1 list-inside list-disc space-y-1 text-zinc-200">
-                          {credentialEmailResult.breachNames.map((name) => (
-                            <li key={name}>{name}</li>
-                          ))}
-                        </ul>
-                      </div>
-                    ) : null}
-                  </div>
-                ) : (
-                  <p className="mt-2 text-sm text-zinc-500">No result yet.</p>
-                )}
-              </div>
-            </section>
-
-            <section className="panel-surface flex h-full flex-col rounded-xl p-6">
-              <h3 className="text-lg font-semibold text-zinc-100">Password Exposure Check</h3>
-              <p className="mt-1 text-sm text-zinc-400">
-                Check whether a password has appeared in known credential leaks.
-              </p>
-
-              <div className="mt-4 space-y-3">
-                <input
-                  type="password"
-                  value={credentialPassword}
-                  onChange={(event) => setCredentialPassword(event.target.value)}
-                  placeholder="Enter password"
-                  className="input-cyber w-full rounded-md px-3 py-2"
-                />
-
-                <button
-                  type="button"
-                  onClick={handleCredentialPasswordCheck}
-                  disabled={credentialPasswordLoading}
-                  className="btn-cyber rounded-md px-4 py-2 text-sm font-semibold disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  {credentialPasswordLoading ? "Checking..." : "Check Password"}
-                </button>
-              </div>
-
-              <div className="panel-surface-muted mt-5 rounded-lg p-4">
-                <h4 className="text-xs uppercase tracking-[0.14em] text-zinc-500">Result</h4>
-
-                {credentialPasswordError ? (
-                  <p className="mt-2 text-sm text-red-300">{credentialPasswordError}</p>
-                ) : credentialPasswordResult ? (
-                  <div className="mt-3 space-y-2 text-sm text-zinc-300">
-                    <div className="flex items-center justify-between">
-                      <span className="text-zinc-500">Status</span>
-                      <span className={credentialPasswordResult.exposed ? "text-red-300" : "text-emerald-300"}>
-                        {credentialPasswordResult.exposed ? "Exposed" : "Not exposed"}
-                      </span>
-                    </div>
-
-                    {credentialPasswordResult.occurrenceCount !== null ? (
-                      <div className="flex items-center justify-between">
-                        <span className="text-zinc-500">Occurrence count</span>
-                        <span>{credentialPasswordResult.occurrenceCount}</span>
-                      </div>
-                    ) : null}
-                  </div>
-                ) : (
-                  <p className="mt-2 text-sm text-zinc-500">No result yet.</p>
-                )}
-              </div>
-            </section>
-          </div>
-        </>
+        <CredentialExposurePage
+          credentialEmail={credentialEmail}
+          setCredentialEmail={setCredentialEmail}
+          credentialEmailLoading={credentialEmailLoading}
+          credentialEmailError={credentialEmailError}
+          credentialEmailResult={credentialEmailResult}
+          credentialPassword={credentialPassword}
+          setCredentialPassword={setCredentialPassword}
+          credentialPasswordLoading={credentialPasswordLoading}
+          credentialPasswordError={credentialPasswordError}
+          credentialPasswordResult={credentialPasswordResult}
+          handleCredentialEmailCheck={handleCredentialEmailCheck}
+          handleCredentialPasswordCheck={handleCredentialPasswordCheck}
+          title={"Credential Exposure"}
+          subtitle={"Check whether an email or password has appeared in known leaks."}
+        />
       );
     }
 
@@ -1606,49 +1266,48 @@ export default function App() {
           <div className="absolute inset-0 bg-[linear-gradient(to_right,rgba(255,255,255,0.03)_1px,transparent_1px)] bg-[size:36px_36px] opacity-20" />
           <div className="absolute inset-x-0 bottom-0 h-px bg-gradient-to-r from-transparent via-red-500/30 to-transparent" />
 
-          <div className="relative z-10 grid h-full grid-cols-[1fr_auto_1fr] items-center px-6">
-            <div className="w-[110px] justify-self-start" aria-hidden="true" />
+          <div className="relative z-10 mx-auto flex h-full w-full max-w-[1240px] items-center px-6">
+            <div className="w-[110px]" aria-hidden="true" />
 
-            <button
-              type="button"
-              onClick={() => setActiveTab("overview")}
-              aria-label="Open home"
-              className={`group relative flex items-center justify-center rounded-full p-2 transition-all duration-300 ${
-                activeTab === "overview" ? "scale-110" : "hover:scale-105"
-              }`}
-            >
-              <div
-                className={`absolute inset-0 rounded-full transition-all duration-300 ${
-                  activeTab === "overview"
-                    ? "bg-red-500/20 blur-xl"
-                    : "bg-red-500/10 blur-lg group-hover:bg-red-500/20"
-                }`}
-              />
-              <div
-                className={`relative rounded-full border px-3 py-2 transition-all duration-300 ${
-                  activeTab === "overview"
-                    ? "border-red-400/60 bg-red-500/10 shadow-[0_0_24px_rgba(239,68,68,0.22)]"
-                    : "border-red-500/25 bg-black/40 group-hover:border-red-400/40"
+            <div className="flex-1 flex items-center justify-center">
+              <button
+                type="button"
+                onClick={() => setActiveTab("overview")}
+                aria-label="Open home"
+                className={`group relative flex items-center justify-center rounded-full p-2 transition-all duration-300 ${
+                  activeTab === "overview" ? "scale-110" : "hover:scale-105"
                 }`}
               >
-                <Eye
-                  className={`h-5 w-5 transition-all duration-300 ${
-                    activeTab === "overview" ? "text-red-300" : "text-red-400"
+                <div
+                  className={`absolute inset-0 rounded-full transition-all duration-300 ${
+                    activeTab === "overview"
+                      ? "bg-red-500/20 blur-xl"
+                      : "bg-red-500/10 blur-lg group-hover:bg-red-500/20"
                   }`}
                 />
-              </div>
-            </button>
+                <div
+                  className={`relative rounded-full border px-3 py-2 transition-all duration-300 ${
+                    activeTab === "overview"
+                      ? "border-red-400/60 bg-red-500/10 shadow-[0_0_24px_rgba(239,68,68,0.22)]"
+                      : "border-red-500/25 bg-black/40 group-hover:border-red-400/40"
+                  }`}
+                >
+                  <Eye
+                    className={`h-5 w-5 transition-all duration-300 ${
+                      activeTab === "overview" ? "text-red-300" : "text-red-400"
+                    }`}
+                  />
+                </div>
+              </button>
+            </div>
 
-            <div className="w-[110px] justify-self-end" aria-hidden="true" />
+            <div className="w-[110px]" aria-hidden="true" />
           </div>
         </header>
 
         <div className="flex min-h-[calc(100vh-64px)] w-full">
           <aside className="sidebar-shell hidden w-[248px] shrink-0 pt-4 lg:block">
             <div className="sidebar-brand px-4 pb-4">
-              {/*
-                
-              */}
               <div className="sidebar-logo-slot" aria-hidden="true">
                 {!sidebarLogoError ? (
                   <img
@@ -1699,168 +1358,36 @@ export default function App() {
       </div>
 
       {isAddAssetOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm">
-          <div className="panel-surface w-full max-w-md rounded-xl p-6">
-            <h3 className="text-xl font-semibold text-zinc-100">Add Asset</h3>
-
-            <div className="mt-5 space-y-4">
-              <div>
-                <label className="mb-1 block text-sm text-zinc-300">Asset Name</label>
-                <input
-                  value={addForm.name}
-                  onChange={(e) => setAddForm((prev) => ({ ...prev, name: e.target.value }))}
-                  className="input-cyber w-full rounded-md px-3 py-2"
-                  placeholder="Optional"
-                />
-              </div>
-
-              <div>
-                <label className="mb-1 block text-sm text-zinc-300">Target</label>
-                <input
-                  value={addForm.target}
-                  onChange={(e) =>
-                    setAddForm((prev) => ({ ...prev, target: e.target.value }))
-                  }
-                  className="input-cyber w-full rounded-md px-3 py-2"
-                  placeholder="IP, domain, or URL"
-                />
-                {addErrors.target ? (
-                  <p className="mt-1 text-xs text-red-300">{addErrors.target}</p>
-                ) : null}
-              </div>
-
-              <div>
-                <label className="mb-1 block text-sm text-zinc-300">Asset Type</label>
-                <select
-                  value={addForm.type}
-                  onChange={(e) => setAddForm((prev) => ({ ...prev, type: e.target.value }))}
-                  className="input-cyber w-full rounded-md px-3 py-2"
-                >
-                  <option value="">Select type</option>
-                  {assetTypeOptions.map((option) => (
-                    <option key={option.value} value={option.value}>
-                      {option.label}
-                    </option>
-                  ))}
-                </select>
-                {addErrors.type ? <p className="mt-1 text-xs text-red-300">{addErrors.type}</p> : null}
-              </div>
-            </div>
-
-            {addSubmitError ? <p className="mt-3 text-sm text-red-300">{addSubmitError}</p> : null}
-
-            <div className="mt-6 flex justify-end gap-2">
-              <button
-                type="button"
-                onClick={() => {
-                  setIsAddAssetOpen(false);
-                  setAddErrors({ target: "", type: "" });
-                  setAddSubmitError("");
-                }}
-                className="btn-cyber-subtle rounded-md px-4 py-2 text-sm"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                onClick={handleSaveAsset}
-                disabled={isSavingAsset}
-                className="btn-cyber rounded-md px-4 py-2 text-sm font-semibold"
-              >
-                {isSavingAsset ? "Saving..." : "Save Asset"}
-              </button>
-            </div>
-          </div>
-        </div>
+        <AddAssetModal
+          addForm={addForm}
+          setAddForm={setAddForm}
+          addErrors={addErrors}
+          addSubmitError={addSubmitError}
+          assetTypeOptions={assetTypeOptions}
+          setIsAddAssetOpen={setIsAddAssetOpen}
+          setAddErrors={setAddErrors}
+          setAddSubmitError={setAddSubmitError}
+          handleSaveAsset={handleSaveAsset}
+          isSavingAsset={isSavingAsset}
+        />
       )}
 
       {selectedAsset && checkDraft && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm">
-          <div className="panel-surface w-full max-w-2xl rounded-xl p-6">
-            <h3 className="text-xl font-semibold text-zinc-100">Configure Checks</h3>
-            <p className="mt-1 text-sm text-zinc-400">
-              {selectedAsset.name || selectedAsset.target} • {getAssetTypeLabel(selectedAsset.type)}
-            </p>
-
-            {configError ? <p className="mt-3 text-sm text-red-300">{configError}</p> : null}
-
-            <div className="mt-5 space-y-3">
-              {configLoading ? (
-                <div className="panel-surface-muted rounded-lg p-4 text-zinc-300">
-                  Loading checks...
-                </div>
-              ) : null}
-
-              {checkDefinitions.map((definition) => {
-                const check = checkDraft[definition.key];
-
-                return (
-                  <div
-                    key={definition.key}
-                    className="panel-surface-muted rounded-lg p-4"
-                  >
-                    <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-                      <div>
-                        <p className="text-sm font-medium text-zinc-200">{definition.label}</p>
-                        {!check.available ? (
-                          <p className="mt-1 text-xs text-zinc-500">Not available for this asset type</p>
-                        ) : null}
-                      </div>
-
-                      <div className="flex items-center gap-3">
-                        <label className="inline-flex items-center gap-2 text-sm text-zinc-300">
-                          <input
-                            type="checkbox"
-                            checked={check.enabled}
-                            disabled={!check.available || configLoading || isSavingConfig}
-                            onChange={(e) => handleToggleCheck(definition.key, e.target.checked)}
-                            className="h-4 w-4 accent-red-500 disabled:accent-zinc-700"
-                          />
-                          Enabled
-                        </label>
-
-                        <select
-                          value={check.frequency || ""}
-                          disabled={!check.available || !check.enabled || configLoading || isSavingConfig}
-                          onChange={(e) => handleFrequencyChange(definition.key, e.target.value)}
-                          className="input-cyber rounded-md px-3 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-40"
-                        >
-                          <option value="">Select frequency</option>
-                          {frequencyOptions.map((option) => (
-                            <option key={option} value={option}>
-                              {option}
-                            </option>
-                          ))}
-                        </select>
-                      </div>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-
-            <div className="mt-6 flex justify-end gap-2">
-              <button
-                type="button"
-                onClick={() => {
-                  setConfiguredAssetId(null);
-                  setCheckDraft(null);
-                }}
-                className="btn-cyber-subtle rounded-md px-4 py-2 text-sm"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                onClick={handleSaveConfiguration}
-                disabled={configLoading || isSavingConfig}
-                className="btn-cyber rounded-md px-4 py-2 text-sm font-semibold"
-              >
-                {isSavingConfig ? "Saving..." : "Save Configuration"}
-              </button>
-            </div>
-          </div>
-        </div>
+        <ConfigureChecksModal
+          selectedAsset={selectedAsset}
+          checkDraft={checkDraft}
+          configError={configError}
+          configLoading={configLoading}
+          isSavingConfig={isSavingConfig}
+          checkDefinitions={checkDefinitions}
+          handleToggleCheck={handleToggleCheck}
+          handleFrequencyChange={handleFrequencyChange}
+          setConfiguredAssetId={setConfiguredAssetId}
+          setCheckDraft={setCheckDraft}
+          handleSaveConfiguration={handleSaveConfiguration}
+          getAssetTypeLabel={getAssetTypeLabel}
+          frequencyOptions={frequencyOptions}
+        />
       )}
     </div>
   );
