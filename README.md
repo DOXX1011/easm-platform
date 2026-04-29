@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <img src="https://ibb.co/twnGCWrg" alt="Argus Main Page" width="900">
+  <img src="https://i.ibb.co/JW81kMJV/main-Page.png" alt="Argus Main Page" width="900">
 </p>
 
 Argus is a lightweight External Attack Surface Management platform designed for SMEs.  
