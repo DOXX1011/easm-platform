@@ -23,12 +23,23 @@ export function deriveFindingsFromRuns(runs, { getTlsDetails, parseBooleanLike }
   const findings = [];
   if (!Array.isArray(runs) || runs.length === 0) return findings;
 
-  function pushFinding({ source_check, finding_key, severity, title, why_it_matters, recommended_action, evidence, valid_for_risk = true, priority_rank = 10, evidence_strength }) {
+  function pushFinding({
+    source_check,
+    finding_key,
+    severity,
+    title,
+    why_it_matters,
+    recommended_action,
+    evidence,
+    valid_for_risk = true,
+    priority_rank = 10,
+    evidence_strength,
+  }) {
     findings.push({
       source_check: source_check || null,
       finding_key: finding_key || null,
       severity: severity || "Informational",
-      title: title || title === "" ? title : (title || ""),
+      title: title || title === "" ? title : title || "",
       summary: title || "",
       why: why_it_matters || "",
       action: recommended_action || "",
@@ -74,41 +85,48 @@ export function deriveFindingsFromRuns(runs, { getTlsDetails, parseBooleanLike }
       const banner = item?.banner || item?.service_banner || null;
       const service = item?.service || item?.service_name || item?.name || null;
       const rawConfidence = (item?.confidence || item?.conf || item?.confidence_level || "").toString().toLowerCase();
-      const confidence = rawConfidence.includes("high") ? "high" : rawConfidence.includes("low") ? "low" : rawConfidence.includes("med") || rawConfidence.includes("medium") ? "medium" : null;
+      const confidence = rawConfidence.includes("high")
+        ? "high"
+        : rawConfidence.includes("low")
+          ? "low"
+          : rawConfidence.includes("med") || rawConfidence.includes("medium")
+            ? "medium"
+            : null;
       const inferred = item?.inferred === true || (!banner && !service);
       return { port, banner, service, confidence, inferred };
     }
 
     function evidenceStrength(item) {
-      
       if (!item) return 1;
-      
       if (item.confidence === "high") return 3;
-      
       if (item.banner && String(item.banner).toLowerCase() !== "no banner") return 3;
-      
       if (item.service && item.confidence !== "low") return 3;
-      
       if (item.confidence === "medium") return 2;
-      
       if (item.confidence === "low") return 1;
       if (item.inferred) return 1;
       return 1;
     }
+
     findingsList.forEach((raw) => {
       const info = normalizeFindingItem(raw);
       const p = info.port;
       if (!Number.isFinite(p)) return;
+
       const strength = evidenceStrength(info);
       const isHighPort = highPorts.has(p);
       const isMedPort = medPorts.has(p);
       const isLowPort = lowPorts.has(p);
 
-      const conservativeTitle = isHighPort && strength < 3 ? `Open service port ${p}` : (isHighPort ? `Open high-risk port ${p}` : `Open service port ${p}`);
+      const conservativeTitle =
+        isHighPort && strength < 3
+          ? `Open service port ${p}`
+          : isHighPort
+            ? `Open high-risk port ${p}`
+            : `Open service port ${p}`;
 
       if (isHighPort) {
-        const sev = strength >= 3 ? "High" : "Medium"; // downgrade weak evidence
-        const nf = {
+        const sev = strength >= 3 ? "High" : "Medium";
+        pushFinding({
           source_check: "ports",
           finding_key: `port-${p}`,
           severity: sev,
@@ -119,25 +137,23 @@ export function deriveFindingsFromRuns(runs, { getTlsDetails, parseBooleanLike }
           valid_for_risk: true,
           priority_rank: portPriority[p] || 85,
           evidence_strength: strength,
-        };
-  pushFinding(nf);
+        });
         return;
       }
 
       if (isMedPort) {
-          const nf = {
-            source_check: "ports",
-            finding_key: `port-${p}`,
-            severity: "Medium",
-            title: `Open service port ${p}`,
-            why_it_matters: `Port ${p} may expose administrative interfaces or unpatched services.`,
-            recommended_action: `Harden service on port ${p} and restrict access where possible.`,
-            evidence: JSON.stringify(raw).slice(0, 200),
-            valid_for_risk: true,
-            priority_rank: 70,
-            evidence_strength: strength,
-          };
-          pushFinding(nf);
+        pushFinding({
+          source_check: "ports",
+          finding_key: `port-${p}`,
+          severity: "Medium",
+          title: `Open service port ${p}`,
+          why_it_matters: `Port ${p} may expose administrative interfaces or unpatched services.`,
+          recommended_action: `Harden service on port ${p} and restrict access where possible.`,
+          evidence: JSON.stringify(raw).slice(0, 200),
+          valid_for_risk: true,
+          priority_rank: 70,
+          evidence_strength: strength,
+        });
         return;
       }
 
@@ -191,12 +207,27 @@ export function deriveFindingsFromRuns(runs, { getTlsDetails, parseBooleanLike }
 
   const tlsRun = getLatestRunByType(runs, "tls");
   if (tlsRun) {
-    const tlsDetails = getTlsDetails ? getTlsDetails(tlsRun.evidence || {}) : { connectivity: {}, certificate: {}, headers: { missing: [] } };
-    
-    const httpsReachable = tlsDetails.connectivity && typeof tlsDetails.connectivity.httpsReachable !== "undefined" ? tlsDetails.connectivity.httpsReachable : null;
-    const httpReachable = tlsDetails.connectivity && typeof tlsDetails.connectivity.httpReachable !== "undefined" ? tlsDetails.connectivity.httpReachable : null;
-    const statusCode = tlsDetails.connectivity && tlsDetails.connectivity.statusCode ? tlsDetails.connectivity.statusCode : null;
-    const evidenceIncomplete = !!tlsRun.evidence?.incomplete || !!tlsRun.evidence?.timeout || statusCode === 503 || tlsRun.status === "failed";
+    const tlsDetails = getTlsDetails
+      ? getTlsDetails(tlsRun.evidence || {})
+      : { connectivity: {}, certificate: {}, headers: { missing: [] } };
+
+    const httpsReachable =
+      tlsDetails.connectivity && typeof tlsDetails.connectivity.httpsReachable !== "undefined"
+        ? tlsDetails.connectivity.httpsReachable
+        : null;
+    const httpReachable =
+      tlsDetails.connectivity && typeof tlsDetails.connectivity.httpReachable !== "undefined"
+        ? tlsDetails.connectivity.httpReachable
+        : null;
+    const statusCode =
+      tlsDetails.connectivity && tlsDetails.connectivity.statusCode
+        ? tlsDetails.connectivity.statusCode
+        : null;
+    const evidenceIncomplete =
+      !!tlsRun.evidence?.incomplete ||
+      !!tlsRun.evidence?.timeout ||
+      statusCode === 503 ||
+      tlsRun.status === "failed";
 
     if (evidenceIncomplete || httpsReachable === null) {
       pushFinding({
@@ -204,8 +235,10 @@ export function deriveFindingsFromRuns(runs, { getTlsDetails, parseBooleanLike }
         finding_key: `tls-operational-${tlsRun.id || Date.now()}`,
         severity: "Medium",
         title: "Target unavailable or assessment incomplete",
-        why_it_matters: "We could not complete a reliable security check for this website. Without a complete assessment, there may be unknown risks that need attention.",
-        recommended_action: "Confirm the site is reachable, fix any availability or server errors, and run the assessment again so we can produce a full result.",
+        why_it_matters:
+          "We could not complete a reliable security check for this website. Without a complete assessment, there may be unknown risks that need attention.",
+        recommended_action:
+          "Confirm the site is reachable, fix any availability or server errors, and run the assessment again so we can produce a full result.",
         evidence: JSON.stringify(tlsRun.evidence || {}).slice(0, 200),
         valid_for_risk: true,
         priority_rank: 70,
@@ -216,8 +249,10 @@ export function deriveFindingsFromRuns(runs, { getTlsDetails, parseBooleanLike }
         finding_key: `https-unavailable-${tlsRun.id || Date.now()}`,
         severity: "High",
         title: "HTTPS unavailable",
-        why_it_matters: "Visitors to the site are not using a secure connection. This can expose sensitive information and reduce customer trust.",
-        recommended_action: "Enable secure (HTTPS) access for the site by installing a valid certificate and ensuring traffic uses the secure connection.",
+        why_it_matters:
+          "Visitors to the site are not using a secure connection. This can expose sensitive information and reduce customer trust.",
+        recommended_action:
+          "Enable secure (HTTPS) access for the site by installing a valid certificate and ensuring traffic uses the secure connection.",
         evidence: "HTTPS unreachable",
         valid_for_risk: true,
         priority_rank: 88,
@@ -228,8 +263,10 @@ export function deriveFindingsFromRuns(runs, { getTlsDetails, parseBooleanLike }
         finding_key: `cert-expired-${tlsRun.id || Date.now()}`,
         severity: "High",
         title: "Certificate expired",
-        why_it_matters: "The site's security certificate has expired. This can break secure connections and cause browsers to warn visitors.",
-        recommended_action: "Renew and publish an up-to-date security certificate so visitors can connect securely.",
+        why_it_matters:
+          "The site's security certificate has expired. This can break secure connections and cause browsers to warn visitors.",
+        recommended_action:
+          "Renew and publish an up-to-date security certificate so visitors can connect securely.",
         evidence: `Expiry: ${tlsDetails.certificate.expiry || "unknown"}`,
         valid_for_risk: true,
         priority_rank: 100,
@@ -241,8 +278,10 @@ export function deriveFindingsFromRuns(runs, { getTlsDetails, parseBooleanLike }
           finding_key: `tls-redirect-${tlsRun.id || Date.now()}`,
           severity: "Medium",
           title: "Redirect to HTTPS missing",
-          why_it_matters: "Some users may still access the site over an insecure connection, which can expose data and reduce trust.",
-          recommended_action: "Update the site or server settings to automatically send users to the secure (HTTPS) version of the site.",
+          why_it_matters:
+            "Some users may still access the site over an insecure connection, which can expose data and reduce trust.",
+          recommended_action:
+            "Update the site or server settings to automatically send users to the secure (HTTPS) version of the site.",
           evidence: "No redirect",
           valid_for_risk: true,
           priority_rank: 55,
@@ -255,8 +294,10 @@ export function deriveFindingsFromRuns(runs, { getTlsDetails, parseBooleanLike }
           finding_key: `tls-headers-${tlsRun.id || Date.now()}`,
           severity: "Medium",
           title: `Missing browser security settings (${tlsDetails.headers.missing.length})`,
-          why_it_matters: "Several browser protection settings are missing. This reduces built-in protection for visitors and makes the website less resilient to common web-based attacks.",
-          recommended_action: "Enable the missing security settings in the website or server configuration and rerun the scan to confirm the protections are active.",
+          why_it_matters:
+            "Several browser protection settings are missing. This reduces built-in protection for visitors and makes the website less resilient to common web-based attacks.",
+          recommended_action:
+            "Enable the missing security settings in the website or server configuration and rerun the scan to confirm the protections are active.",
           evidence: tlsDetails.headers.missing.join(", "),
           valid_for_risk: true,
           priority_rank: 60,
@@ -267,15 +308,18 @@ export function deriveFindingsFromRuns(runs, { getTlsDetails, parseBooleanLike }
           finding_key: `tls-headers-minor-${tlsRun.id || Date.now()}`,
           severity: "Low",
           title: `${tlsDetails.headers.missing.length} security settings missing`,
-          why_it_matters: "Some browser protection settings are not enabled. While not critical, enabling them improves visitor protection.",
-          recommended_action: "Enable the missing settings and rerun the scan to confirm they are active.",
+          why_it_matters:
+            "Some browser protection settings are not enabled. While not critical, enabling them improves visitor protection.",
+          recommended_action:
+            "Enable the missing settings and rerun the scan to confirm they are active.",
           evidence: tlsDetails.headers.missing.join(", "),
           valid_for_risk: true,
           priority_rank: 60,
         });
       }
+    }
   }
-  
+
   const emailRun = getLatestRunByType(runs, "email");
   if (emailRun) {
     const spf = emailRun.evidence?.spf;
@@ -298,6 +342,7 @@ export function deriveFindingsFromRuns(runs, { getTlsDetails, parseBooleanLike }
         priority_rank: 50,
       });
     }
+
     if (!dmarcPresent) {
       pushFinding({
         source_check: "email",
@@ -311,6 +356,7 @@ export function deriveFindingsFromRuns(runs, { getTlsDetails, parseBooleanLike }
         priority_rank: 48,
       });
     }
+
     if (!dkimPresent) {
       pushFinding({
         source_check: "email",
@@ -326,11 +372,20 @@ export function deriveFindingsFromRuns(runs, { getTlsDetails, parseBooleanLike }
     }
   }
 
-  const credRun = getLatestRunByType(runs, "credentials") || getLatestRunByType(runs, "credential") || getLatestRunByType(runs, "credential_exposure");
+  const credRun =
+    getLatestRunByType(runs, "credentials") ||
+    getLatestRunByType(runs, "credential") ||
+    getLatestRunByType(runs, "credential_exposure");
+
   if (credRun) {
     const payload = credRun.evidence || {};
-    const foundEmail = parseBooleanLike ? parseBooleanLike(payload?.found) === true || parseBooleanLike(payload?.exposed) === true : false;
-    const foundPassword = parseBooleanLike ? parseBooleanLike(payload?.exposed) === true || parseBooleanLike(payload?.breached) === true : false;
+    const foundEmail = parseBooleanLike
+      ? parseBooleanLike(payload?.found) === true || parseBooleanLike(payload?.exposed) === true
+      : false;
+    const foundPassword = parseBooleanLike
+      ? parseBooleanLike(payload?.exposed) === true || parseBooleanLike(payload?.breached) === true
+      : false;
+
     if (foundEmail) {
       pushFinding({
         source_check: "credentials",
@@ -344,6 +399,7 @@ export function deriveFindingsFromRuns(runs, { getTlsDetails, parseBooleanLike }
         priority_rank: 95,
       });
     }
+
     if (foundPassword) {
       pushFinding({
         source_check: "credentials",
@@ -360,5 +416,4 @@ export function deriveFindingsFromRuns(runs, { getTlsDetails, parseBooleanLike }
   }
 
   return findings;
-}
 }
